@@ -17,6 +17,7 @@ Hard rules for this session:
   (`python tools/memory_manager.py --workspace .`, `reference/v_iteration.schema.json`).
 - `.claude/skills/ncu-report-skill/` — NVIDIA profiling skill (Stage 1).
 - `.claude/skills/KernelWiki/` — kernel optimization knowledge base (Stage 2 L1 search).
+- `.claude/skills/kernel-opt-playbook/` — proven optimization techniques by operator category, queried with `query.py` (Stage 2, before planning).
 - `/humanize:gen-plan` — plan generation plugin (Stage 2, loaded via `--plugin-dir`).
 
 {{HARDWARE}}
@@ -98,7 +99,8 @@ Execution steps:
 1. **Mandatory reads**: workspace `README.md`, `gpu-wiki/README.md`, all unmasked `memory/v*.json`, historical `plans/v*_plan.md`.
 2. **Parse historical Search Logs** from prior plans to build a used-knowledge set (deduplication reference).
 3. **Determine stall count**: Count the number of consecutive most-recent reverted versions (no improvement) from the memory summary. Record as `STALL_COUNT`.
-4. **Architecture-scoped L1 retrieval**: Read the target architecture from workspace `README.md`, then query main's architecture-first wiki before broad grep. Use narrow symptom, operator, and mechanism queries; open the returned pages and follow their local links:
+4. {{PLAN_PLAYBOOK}}
+5. **Architecture-scoped L1 retrieval**: Read the target architecture from workspace `README.md`, then query main's architecture-first wiki before broad grep. Use narrow symptom, operator, and mechanism queries; open the returned pages and follow their local links:
    ```bash
    python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd> \
      --area docs --section kernel-opt --symptom <controlled-symptom>
@@ -114,21 +116,21 @@ Execution steps:
    while keeping the same architecture/vendor/DSL filters. Copied filenames and
    paths work directly without fuzzy mode. Unknown filters must fail closed. Do
    not remove `--arch` to make an empty result look successful.
-5. **Research strategy** (adaptive based on stall count):
+6. **Research strategy** (adaptive based on stall count):
    - **Normal mode** (`STALL_COUNT < 3`): No novelty requirement. Reusing known directions from `open_directions`, prior search findings, or profile evidence is not prohibited.
    - **Forced expansion mode** (`STALL_COUNT >= 3`): The previous directions have failed repeatedly — you MUST expand the search space. Do not limit searches to the current kernel's DSL/language; look at optimization techniques from **other languages or DSLs targeting the same or similar hardware architectures** (e.g., CUDA C++ tricks applicable to Triton, or CuteDSL patterns that inspire Gluon rewrites) and adapt the ideas. Execute the full three-layer progressive search (strict order):
      - **L1 (gpu-wiki)**: Translate bottleneck diagnoses from `profiles/v{{N}}/REPORT.md` into search keywords. Search architecture-scoped `gpu-wiki/docs/` first, then `gpu-wiki/reference-kernels/`. Only after those P0-P4 sources are insufficient, use `.claude/skills/KernelWiki` or `gpu-wiki/3rdparty/` as P5 sources for NVIDIA SM90/SM100.
      - **L2 (reference-projects)**: Only if L1 yields no new actionable path. Search relevant modules in `reference-projects/` for implementation patterns.
      - **L3 (public web)**: Only if L1+L2 yield nothing new. Use web search for papers, docs, or community posts.
      - The draft MUST contain at least one `New? = Yes` entry. If all layers produce no new finding, report search space exhaustion and stop — do not fabricate a draft or invoke gen-plan.
-6. **Stop early**: Once you find **one viable optimization direction** with supporting evidence, proceed to draft immediately. Do not exhaustively search all layers.
-7. **Write draft** to `plans/v{{N}}_draft.md` — a concise summary of:
+7. **Stop early**: Once you find **one viable optimization direction** with supporting evidence, proceed to draft immediately. Do not exhaustively search all layers.
+8. **Write draft** to `plans/v{{N}}_draft.md` — a concise summary of:
    - Input Evidence: key metrics and diagnoses from `profiles/v{{N}}/REPORT.md`
-   - Search findings: what you found (with Layer, New? annotations) and the chosen optimization direction
+   - Search findings: what you found (with Layer, New? annotations), the playbook techniques you kept or discarded (with their tags and pitfalls), and the chosen optimization direction
    - Constraints: target framework, platform, correctness requirements
    - Stall context: current `STALL_COUNT` and whether forced expansion was triggered
    - Performance expectation: a measurable post-change profile/latency expectation, plus the condition that would justify PTX/SASS inspection if compiler lowering could explain a mismatch
-8. **Generate plan** via humanize:
+9. **Generate plan** via humanize:
    ```
    /humanize:gen-plan --input plans/v{{N}}_draft.md --output plans/v{{N}}_plan.md --direct
    ```
@@ -151,6 +153,13 @@ Execution steps:
 4. **Correctness validation** — immediately after editing:
    ```bash
    python tools/sandbox.py --no-sync -- python test_kernel.py --version v{{N}} --no-memory
+   ```
+   **If the workspace contains `.sol_chunk`**, this operator's workload sweep cannot finish inside the
+   gateway's per-job execution limit. Use the chunked driver instead, everywhere you would otherwise
+   run `test_kernel.py` (here and in Stage 4). It splits the sweep across several sandbox jobs and
+   prints the same merged `RESULT_JSON`:
+   ```bash
+   python tools/bench_sol.py --version v{{N}} --no-memory
    ```
    Parse the emitted `RESULT_JSON`, then update local `memory/v{{N}}.json`. If validation fails, iteratively
    fix until it passes. Do not proceed to Stage 4 with broken correctness.

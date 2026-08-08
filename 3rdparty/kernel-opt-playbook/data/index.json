@@ -1,0 +1,272 @@
+{
+  "total_records": 3090,
+  "categories": {
+    "attention": {
+      "count": 1206,
+      "framework_breakdown": {
+        "triton": 1118,
+        "cuda": 88
+      },
+      "subcategories": {
+        "paged_decode": 392,
+        "qk_norm_rope": 293,
+        "generic": 233,
+        "projection": 100,
+        "mask": 90,
+        "ragged_prefill": 68,
+        "mla": 30
+      },
+      "top_technique_tags": {
+        "fusion": 306,
+        "dispatch_threshold": 165,
+        "warp_count_tuning": 164,
+        "initial_kernel": 99,
+        "launch_overhead_reduction": 94,
+        "framework_migration": 63,
+        "cuda_graph": 48,
+        "flash_attention": 43,
+        "tf32": 40,
+        "vectorization": 34,
+        "persistent_kernel": 30,
+        "microbenchmark_added": 27,
+        "block_size_tuning": 20,
+        "alignment_fix": 15,
+        "cache_modifier": 13
+      },
+      "median_speedup": 1.033,
+      "max_speedup": 502.57,
+      "file": "by_category/attention.jsonl"
+    },
+    "normalization": {
+      "count": 607,
+      "framework_breakdown": {
+        "triton": 528,
+        "cuda": 79
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "warp_count_tuning": 135,
+        "fusion": 108,
+        "framework_migration": 89,
+        "dispatch_threshold": 71,
+        "initial_kernel": 54,
+        "cache_modifier": 50,
+        "vectorization": 49,
+        "cuda_graph": 41,
+        "block_size_tuning": 38,
+        "launch_overhead_reduction": 35,
+        "microbenchmark_added": 28,
+        "size_per_thread_tuning": 25,
+        "tf32": 18,
+        "persistent_kernel": 17,
+        "loop_unroll": 7
+      },
+      "median_speedup": 1.025,
+      "max_speedup": 35.51,
+      "file": "by_category/normalization.jsonl"
+    },
+    "gemm_matmul": {
+      "count": 339,
+      "framework_breakdown": {
+        "cuda": 103,
+        "triton": 232,
+        "gluon": 4
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "fusion": 113,
+        "dispatch_threshold": 48,
+        "framework_migration": 40,
+        "warp_count_tuning": 31,
+        "tf32": 27,
+        "initial_kernel": 26,
+        "persistent_kernel": 16,
+        "launch_overhead_reduction": 16,
+        "block_size_tuning": 14,
+        "mamba": 13,
+        "vectorization": 10,
+        "alignment_fix": 9,
+        "cuda_graph": 8,
+        "microbenchmark_added": 5,
+        "size_per_thread_tuning": 4
+      },
+      "median_speedup": 1.029,
+      "max_speedup": 254.86,
+      "file": "by_category/gemm_matmul.jsonl"
+    },
+    "moe": {
+      "count": 318,
+      "framework_breakdown": {
+        "triton": 264,
+        "cuda": 54
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "fusion": 95,
+        "dispatch_threshold": 77,
+        "launch_overhead_reduction": 35,
+        "initial_kernel": 35,
+        "tf32": 32,
+        "warp_count_tuning": 30,
+        "framework_migration": 23,
+        "cuda_graph": 20,
+        "vectorization": 18,
+        "block_size_tuning": 16,
+        "multi_stream": 13,
+        "microbenchmark_added": 9,
+        "persistent_kernel": 9,
+        "loop_unroll": 6,
+        "cache_modifier": 6
+      },
+      "median_speedup": 1.035,
+      "max_speedup": 199.62,
+      "file": "by_category/moe.jsonl"
+    },
+    "rope_position": {
+      "count": 304,
+      "framework_breakdown": {
+        "cuda": 48,
+        "triton": 256
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "fusion": 63,
+        "warp_count_tuning": 50,
+        "dispatch_threshold": 26,
+        "vectorization": 24,
+        "launch_overhead_reduction": 24,
+        "framework_migration": 21,
+        "block_size_tuning": 19,
+        "initial_kernel": 18,
+        "cache_modifier": 18,
+        "loop_unroll": 15,
+        "persistent_kernel": 15,
+        "size_per_thread_tuning": 13,
+        "division_optimization": 7,
+        "cuda_graph": 6,
+        "compiler_hint": 6
+      },
+      "median_speedup": 1.04,
+      "max_speedup": 648.18,
+      "file": "by_category/rope_position.jsonl"
+    },
+    "activation_elementwise": {
+      "count": 196,
+      "framework_breakdown": {
+        "triton": 169,
+        "cuda": 27
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "fusion": 60,
+        "dispatch_threshold": 47,
+        "warp_count_tuning": 30,
+        "initial_kernel": 21,
+        "tf32": 21,
+        "block_size_tuning": 18,
+        "vectorization": 13,
+        "launch_overhead_reduction": 12,
+        "framework_migration": 12,
+        "cuda_graph": 11,
+        "cache_modifier": 10,
+        "size_per_thread_tuning": 8,
+        "microbenchmark_added": 7,
+        "alignment_fix": 5,
+        "persistent_kernel": 2
+      },
+      "median_speedup": 1.031,
+      "max_speedup": 59.03,
+      "file": "by_category/activation_elementwise.jsonl"
+    },
+    "mamba_ssm": {
+      "count": 39,
+      "framework_breakdown": {
+        "triton": 36,
+        "cuda": 3
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "warp_count_tuning": 7,
+        "loop_unroll": 6,
+        "fusion": 5,
+        "framework_migration": 3,
+        "tf32": 2,
+        "initial_kernel": 2,
+        "block_size_tuning": 1,
+        "dispatch_threshold": 1
+      },
+      "median_speedup": 1.073,
+      "max_speedup": 2164502164.5,
+      "file": "by_category/mamba_ssm.jsonl"
+    },
+    "conv": {
+      "count": 37,
+      "framework_breakdown": {
+        "cuda": 7,
+        "triton": 30
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "warp_count_tuning": 10,
+        "framework_migration": 9,
+        "fusion": 7,
+        "vectorization": 5,
+        "dispatch_threshold": 4,
+        "division_optimization": 3,
+        "initial_kernel": 2,
+        "tf32": 2,
+        "hybrid_dispatch": 2,
+        "size_per_thread_tuning": 2,
+        "mamba": 1,
+        "multi_stream": 1,
+        "alignment_fix": 1
+      },
+      "median_speedup": 1.021,
+      "max_speedup": 5.24,
+      "file": "by_category/conv.jsonl"
+    },
+    "fft": {
+      "count": 22,
+      "framework_breakdown": {
+        "triton": 22
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "fusion": 6,
+        "vectorization": 5,
+        "framework_migration": 2,
+        "launch_overhead_reduction": 2,
+        "dispatch_threshold": 2,
+        "persistent_kernel": 1,
+        "alignment_fix": 1,
+        "hybrid_dispatch": 1,
+        "tf32": 1,
+        "initial_kernel": 1
+      },
+      "median_speedup": 1.13,
+      "max_speedup": 1.57,
+      "file": "by_category/fft.jsonl"
+    },
+    "reduction_scatter": {
+      "count": 22,
+      "framework_breakdown": {
+        "triton": 22
+      },
+      "subcategories": {},
+      "top_technique_tags": {
+        "dispatch_threshold": 6,
+        "microbenchmark_added": 3,
+        "fusion": 2,
+        "block_size_tuning": 2,
+        "launch_overhead_reduction": 2,
+        "warp_count_tuning": 2,
+        "vectorization": 1,
+        "initial_kernel": 1,
+        "framework_migration": 1
+      },
+      "median_speedup": 1.055,
+      "max_speedup": 3.44,
+      "file": "by_category/reduction_scatter.jsonl"
+    }
+  }
+}

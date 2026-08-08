@@ -228,7 +228,12 @@ with tarfile.open(fileobj=archive, mode="w:gz") as tf:
 if skipped:
     print("[sandbox] artifacts not returned: " + ", ".join(skipped), file=sys.stderr)
 print(BEGIN)
-print(base64.b64encode(archive.getvalue()).decode("ascii"))
+# The gateway elides long whitespace-free stdout tokens (observed elision of
+# 380-char base64 lines on the L20C gateway), so wrap the base64 payload into
+# short lines; the local extractor strips all whitespace before decoding.
+_b64 = base64.b64encode(archive.getvalue()).decode("ascii")
+for _i in range(0, len(_b64), 76):
+    print(_b64[_i:_i + 76])
 print(END)
 '''
 
@@ -452,7 +457,12 @@ def main(argv: list[str] | None = None) -> int:
         agate += [
             "--gpu", args.hardware,
             "--dev-timeout", str(args.timeout),
-            "--timeout", str(args.timeout + 120),
+            # `--timeout` is deprecated and sets the job budget too, so padding it pushed
+            # timeout_s past the gateway's 600s ceiling (422). Only the client-side deadlines
+            # may outlive the execution they wait on.
+            "--job-timeout", str(args.timeout),
+            "--http-timeout", str(args.timeout + 120),
+            "--wait-timeout", str(args.timeout + 120),
             "--file", f"__atrex_workspace.tar.gz.b64={bundle_path}",
             "--file", f"__atrex_command.sh={command_path}",
             "--file", f"__atrex_collect.py={collector_path}",

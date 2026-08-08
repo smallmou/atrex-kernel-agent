@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -63,9 +64,20 @@ def _build_kernel(defn: dict) -> str:
     params = ", ".join(inputs + outputs)
     call = ", ".join(inputs)
     if len(outputs) == 1:
-        assign = f"    {outputs[0]}[:] = _out\n"
+        # A reference may return its output directly or as a dict keyed by the output name.
+        assign = (
+            "    if isinstance(_out, dict):\n"
+            f"        _out = _out[\"{outputs[0]}\"]\n"
+            f"    {outputs[0]}[:] = _out\n"
+        )
     else:
-        assign = "    if not isinstance(_out, (tuple, list)):\n        _out = (_out,)\n"
+        keys = ", ".join(f'"{o}"' for o in outputs)
+        assign = (
+            f"    if isinstance(_out, dict):\n"
+            f"        _out = tuple(_out[_k] for _k in ({keys},))\n"
+            "    elif not isinstance(_out, (tuple, list)):\n"
+            "        _out = (_out,)\n"
+        )
         for i, o in enumerate(outputs):
             assign += f"    {o}[:] = _out[{i}]\n"
     header = (
@@ -171,6 +183,7 @@ GITIGNORE = """__pycache__/
 *.pyc
 traces.jsonl
 .finalize_traces.jsonl
+.bench_chunks/
 submission.json
 *.ncu-rep
 profiles/*/att/*.att
@@ -209,13 +222,35 @@ def main(argv: list[str] | None = None) -> int:
     for sub in ("memory", "plans", "profiles"):
         (ws / sub).mkdir(parents=True, exist_ok=True)
 
-    # 1) ground truth, verbatim
+    # 1) ground truth, verbatim — except that definition.json needs one normalization:
+    # sol-execbench validates hf_id as Optional[NonEmptyString], so it accepts the key absent
+    # or with >=1 character, but not "". Some benchmark suites (FlashInfer-Bench) ship "",
+    # which fails validation before any GPU work. It is optional provenance metadata, so
+    # dropping it is lossless for evaluation.
     for f in GROUND_TRUTH:
+        if f == "definition.json":
+            normalized = dict(defn)
+            if not normalized.get("hf_id"):
+                normalized.pop("hf_id", None)
+            (ws / f).write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
+            continue
         (ws / f).write_text((op / f).read_text(encoding="utf-8"), encoding="utf-8")
 
-    # 2) pinned eval config (matches a submission; stable across versions)
+    # 2) pinned eval config (matches a submission; stable across versions).
+    # benchmark_reference is off: it re-benches the slow PyTorch reference on every run, which
+    # roughly doubles job time and pushes the heavy paged-attention operators past the gateway's
+    # 600s per-job execution cap. The objective is the candidate's geomean latency; speedup vs
+    # reference is only reported, never gated on.
+    # The run counts are overridable because some references cannot sweep every workload inside
+    # that same 600s cap even once. This file is written once per workspace, so whatever counts a
+    # campaign is seeded with are then used identically by all of its versions.
     (ws / "config.json").write_text(
-        json.dumps({"seed": 200, "warmup_runs": 10, "iterations": 50, "benchmark_reference": True}, indent=2) + "\n",
+        json.dumps({
+            "seed": 200,
+            "warmup_runs": int(os.environ.get("SOL_WARMUP_RUNS", "10")),
+            "iterations": int(os.environ.get("SOL_ITERATIONS", "50")),
+            "benchmark_reference": False,
+        }, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -233,6 +268,12 @@ def main(argv: list[str] | None = None) -> int:
     n_wl = sum(1 for line in (op / "workload.jsonl").read_text().splitlines() if line.strip())
     (ws / "README.md").write_text(_readme(args.name, defn, args.framework, args.platform, args.gpu_wiki, n_wl), encoding="utf-8")
     (ws / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+    # A sweep that cannot finish inside the gateway's 600s per-job execution cap has to be
+    # evaluated in several jobs. Recording the per-job workload count here keeps the split
+    # identical for every version of this operator (see tools/bench_sol.py).
+    chunk = os.environ.get("SOL_CHUNK", "").strip()
+    if chunk:
+        (ws / ".sol_chunk").write_text(f"{int(chunk)}\n", encoding="utf-8")
 
     # 5) V0 baseline metrics (real evaluator)
     pre_existing_v0 = (ws / "memory" / "v0.json").exists() and args.skip_bench_if_v0_exists

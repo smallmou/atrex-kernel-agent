@@ -729,6 +729,47 @@ def hardware_directive(platform: str, arch: str) -> str:
 
 
 
+def _playbook_framework_tag(framework: str) -> str:
+    """Map a campaign framework onto the playbook's framework tag, or '' when uncovered."""
+    return {"triton": "triton", "cuda": "cuda", "gluon": "gluon"}.get(framework.strip().lower(), "")
+
+
+def _plan_playbook_directive(framework: str) -> str:
+    tag = _playbook_framework_tag(framework)
+    if tag:
+        pull = f"--category <category> --framework {tag}"
+        detail = f"--category <category> --framework {tag} --tag <technique_tag> --full"
+        scope = f"Pull only `{tag}` experiences — techniques do not transfer well across frameworks."
+    else:
+        # Records are tagged cuda/triton/gluon only; CuteDSL and FlyDSL have no coverage, so
+        # filtering by framework would return an empty set.
+        pull = "--category <category>"
+        detail = "--category <category> --tag <technique_tag> --full"
+        scope = (
+            f"`{framework}` has no coverage in the playbook, so do not pass `--framework`. Read the "
+            "unfiltered records for the category and transfer only the algorithmic idea, not the code."
+        )
+    return (
+        "**Playbook consultation** (before any other search): pull the techniques that have already "
+        "worked on this operator class from the `kernel-opt-playbook` skill. `query.py` resolves "
+        "`data/` relative to its own directory, so run it from there — in a subshell, so this "
+        "session's cwd stays the workspace.\n"
+        "   ```bash\n"
+        "   PB=.claude/skills/kernel-opt-playbook\n"
+        "   (cd $PB && python3 query.py --list)                 # categories, counts, framework split\n"
+        f"   (cd $PB && python3 query.py {pull})\n"
+        f"   (cd $PB && python3 query.py {detail})\n"
+        "   ```\n"
+        "   Classify this operator by its **compute pattern**, not its name, using\n"
+        "   `$PB/references/_classify.md`. Results are ranked by (usage count x median speedup), most\n"
+        f"   reliable first; the `--full` form dumps every record behind a technique. {scope}\n"
+        "   Carry the surviving techniques into the draft as ranked candidate directions, each with\n"
+        "   its pitfall and how you will avoid it, and name the technique tag in the\n"
+        "   evidence-to-action chain. The playbook is prior evidence, not a substitute for this\n"
+        "   iteration's profile: discard any technique the profile contradicts, and say why."
+    )
+
+
 def link_runtime(workspace: Path) -> None:
     """Make the skill's `tools/`, `reference/`, `skills/`, `reference-projects/`, `gpu-wiki/` resolvable from cwd=workspace.
 
@@ -749,13 +790,19 @@ def link_runtime(workspace: Path) -> None:
     # so selecting a different --agent-cli does not change the available optimization knowledge.
     ncu_src = REPO_ROOT / "3rdparty" / "ncu-report-skill"
     kw_src = REPO_ROOT / "gpu-wiki" / "3rdparty" / "KernelWiki"
+    playbook_src = REPO_ROOT / "3rdparty" / "kernel-opt-playbook"
+    shared_skills = (
+        (ncu_src, "ncu-report-skill"),
+        (kw_src, "KernelWiki"),
+        (playbook_src, "kernel-opt-playbook"),
+    )
     agents_src = REPO_ROOT / "agents"
     for runtime_dir_name in (".claude", ".qoder"):
         runtime_dir = workspace / runtime_dir_name
         runtime_skills_dir = runtime_dir / "skills"
         runtime_agents_dir = runtime_dir / "agents"
         runtime_skills_dir.mkdir(parents=True, exist_ok=True)
-        for src, name in ((ncu_src, "ncu-report-skill"), (kw_src, "KernelWiki")):
+        for src, name in shared_skills:
             dst = runtime_skills_dir / name
             if src.exists() and not dst.exists():
                 os.symlink(src, dst)
@@ -887,14 +934,32 @@ class Campaign:
                "--no-bench"]
         subprocess.run(cmd, check=True)
         self._link_runtime()
-        test = _sandbox_command(
-            self.workspace,
-            self.sandbox_hardware,
-            self.sandbox_profile,
-            self.sandbox_url,
-            self.sandbox_timeout,
-            ["python", "test_kernel.py", "--version", "v0", "--no-memory"],
-        )
+        if (self.workspace / ".sol_chunk").is_file():
+            # This operator's sweep exceeds the gateway's per-job execution cap; bench_sol.py
+            # runs it as several sandbox jobs and merges their traces into one RESULT_JSON.
+            env = dict(os.environ)
+            if self.sandbox_hardware:
+                env["ATREX_SANDBOX_GPU"] = self.sandbox_hardware
+            if self.sandbox_url:
+                env["ATREX_SANDBOX_URL"] = self.sandbox_url
+                env.pop("ATREX_SANDBOX_PROFILE", None)
+            elif self.sandbox_profile:
+                env["ATREX_SANDBOX_PROFILE"] = self.sandbox_profile
+                env.pop("ATREX_SANDBOX_URL", None)
+            env["ATREX_SANDBOX_TIMEOUT"] = str(self.sandbox_timeout)
+            test = subprocess.run(
+                [sys.executable, "tools/bench_sol.py", "--version", "v0", "--no-memory"],
+                cwd=str(self.workspace), capture_output=True, text=True, env=env,
+            )
+        else:
+            test = _sandbox_command(
+                self.workspace,
+                self.sandbox_hardware,
+                self.sandbox_profile,
+                self.sandbox_url,
+                self.sandbox_timeout,
+                ["python", "test_kernel.py", "--version", "v0", "--no-memory"],
+            )
         if test.stdout:
             print(test.stdout, end="" if test.stdout.endswith("\n") else "\n", flush=True)
         if test.stderr:
@@ -985,6 +1050,7 @@ class Campaign:
                 prompt = _render(PROMPTS_DIR / "iteration.md",
                                  WORKSPACE=str(self.workspace), N=n, PREV=n - 1,
                                  PLATFORM=self.platform, NOTES=self.notes,
+                                 PLAN_PLAYBOOK=_plan_playbook_directive(self.framework),
                                  HARDWARE=hardware_directive(self.platform, self.arch),
                                  SANDBOX=self._sandbox_directive())
             pre_head = git_head(self.workspace)  # win = a commit that changes kernel.py vs this
@@ -1469,6 +1535,7 @@ class LayerCampaign:
             prompt = _render(PROMPTS_DIR / "iteration.md",
                              WORKSPACE=str(ws), N=n, PREV=n - 1,
                              PLATFORM=self.platform, NOTES=self.notes,
+                             PLAN_PLAYBOOK=_plan_playbook_directive(self.framework),
                              HARDWARE=hardware_directive(self.platform, self.arch),
                              SANDBOX=self._sandbox_directive())
             res = run_session(

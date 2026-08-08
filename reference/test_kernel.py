@@ -72,17 +72,65 @@ def _geomean(xs: list[float]) -> float:
     return math.exp(sum(math.log(x) for x in xs) / len(xs))
 
 
-def _run_eval(workspace: Path, traces_path: Path) -> None:
+def _workload_blob_env(workspace: Path) -> dict[str, str]:
+    """Point the evaluator at the installed safetensors blobs, if any are needed.
+
+    Workloads may declare inputs as ``{"type": "safetensors", "path": "data/..."}`` relative to
+    the SOL-ExecBench checkout. The eval driver resolves those against its own temp staging dir
+    plus ``FLASHINFER_TRACE_DIR``, so the blobs cannot be reached by anything in the uploaded
+    workspace — the env var is the only seam. Its resolver strips leading path components, so
+    pointing at the flashinfer-trace root matches a ``data/flashinfer-trace/blob/...`` path.
+    """
+    workloads = workspace / "workload.jsonl"
+    if not workloads.is_file():
+        return {}
+    needs_blobs = False
+    for line in workloads.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if any(
+            isinstance(spec, dict) and spec.get("type") == "safetensors"
+            for spec in (record.get("inputs") or {}).values()
+        ):
+            needs_blobs = True
+            break
+    if not needs_blobs or os.environ.get("FLASHINFER_TRACE_DIR"):
+        return {}
+
+    for root in (Path("/sol-execbench/data/flashinfer-trace"),
+                 Path("/sol-execbench/data") / "flashinfer-trace"):
+        if root.is_dir():
+            print(f"[test_kernel] FLASHINFER_TRACE_DIR={root}", flush=True)
+            return {"FLASHINFER_TRACE_DIR": str(root)}
+    print(
+        "[test_kernel] WARNING: workloads need safetensors blobs but no flashinfer-trace "
+        "directory was found; set FLASHINFER_TRACE_DIR",
+        flush=True,
+    )
+    return {}
+
+
+def _run_eval(workspace: Path, traces_path: Path, workload_file: Path | None = None) -> None:
     cmd = _sol_execbench_cmd() + [".", "--solution", "solution.json", "-o", str(traces_path)]
     if (workspace / "config.json").exists():
         cmd += ["--config", "config.json"]
+    # A subset file lets a sweep that cannot finish inside the gateway's per-job execution
+    # limit be evaluated in several jobs, each covering part of workload.jsonl.
+    if workload_file is not None:
+        cmd += ["--workload", str(workload_file)]
     # Allow overriding the evaluator subprocess timeout via env var (seconds).
     # The PyTorch V0 reference can be very slow on large workloads; default 1200s.
     eval_timeout = os.environ.get("SOL_EVAL_TIMEOUT", "1200")
     cmd += ["--timeout", str(eval_timeout)]
     print(f"[test_kernel] {' '.join(cmd)}", flush=True)
     # Stream the evaluator's own table to stderr; traces go to the JSONL file.
-    subprocess.run(cmd, cwd=str(workspace), check=False)
+    subprocess.run(cmd, cwd=str(workspace), check=False,
+                   env={**os.environ, **_workload_blob_env(workspace)})
 
 
 def _parse_traces(traces_path: Path) -> list[dict]:
@@ -121,7 +169,14 @@ def _summarize(traces: list[dict]) -> dict:
             if isinstance(spd, (int, float)) and spd > 0:
                 speedups.append(float(spd))
         else:
-            failures.append(f"{uuid[:8]}={status or 'NO_EVAL'} ({wl.get('axes')})")
+            # evaluation.log is the evaluator's captured stdout/stderr, and it stays in the
+            # sandbox pod; carrying its tail out here is the only way to diagnose a
+            # RUNTIME_ERROR from the orchestrator log.
+            detail = ""
+            log_lines = [ln.strip() for ln in (ev.get("log") or "").splitlines() if ln.strip()]
+            if log_lines:
+                detail = ": " + log_lines[-1][:200]
+            failures.append(f"{uuid[:8]}={status or 'NO_EVAL'} ({wl.get('axes')}){detail}")
 
     passed = total - len(failures)
     all_pass = total > 0 and passed == total
@@ -219,6 +274,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Random seed for input generation. If not set, uses sol-execbench default.")
     ap.add_argument("--multi-seed", type=int, default=0, metavar="N",
                     help="Run N additional seeds (1..N) for robustness check. Reports PASS only if ALL seeds pass.")
+    ap.add_argument("--workload", default=None,
+                    help="Evaluate only the workloads in this file instead of the whole "
+                         "workload.jsonl. Used to split a sweep that cannot finish inside the "
+                         "gateway's per-job execution limit.")
+    ap.add_argument("--traces-out", default=None,
+                    help="Where to write the evaluator traces (default: <workspace>/traces.jsonl).")
     args = ap.parse_args(argv)
 
     workspace = Path(args.workspace).resolve()
@@ -237,8 +298,11 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             pass
 
-    traces_path = workspace / "traces.jsonl"
-    _run_eval(workspace, traces_path)
+    traces_path = Path(args.traces_out) if args.traces_out else workspace / "traces.jsonl"
+    if not traces_path.is_absolute():
+        traces_path = workspace / traces_path
+    workload_file = Path(args.workload) if args.workload else None
+    _run_eval(workspace, traces_path, workload_file)
     s = _summarize(_parse_traces(traces_path))
 
     print("\n[test_kernel] ── SOL-ExecBench result ─────────────────────────────")
