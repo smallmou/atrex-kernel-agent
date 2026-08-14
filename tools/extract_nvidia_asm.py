@@ -17,7 +17,7 @@
 NVIDIA SASS/PTX Extraction and Analysis Tool
 
 Extracts SASS (native GPU assembly) from compiled NVIDIA kernels and analyzes
-key instruction patterns. Counterpart to the AMD-side extract_asm.py.
+key instruction patterns.
 
 Usage:
     # Extract SASS from .ncu-rep (recommended, especially for CuteDSL kernels)
@@ -62,7 +62,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 
 # ============================================================
@@ -83,11 +82,6 @@ def extract_sass_from_cubin(cubin_path):
     if result.returncode != 0:
         raise RuntimeError(f"cuobjdump failed: {result.stderr}")
     return result.stdout
-
-
-def extract_sass_from_so(so_path):
-    """Extract SASS from a .so file (for nvcc-compiled CUDA/CUTLASS kernels)."""
-    return extract_sass_from_cubin(so_path)
 
 
 def extract_ptxas_stats(cubin_path):

@@ -967,11 +967,6 @@ class LongHorizonCampaign:
                 self.workspace
             )
         self._recover_interrupted(store, state)
-        if working_changes(self.workspace):
-            raise RuntimeError(
-                "long-horizon campaign requires a clean incumbent workspace: "
-                + ", ".join(working_changes(self.workspace)[:12])
-            )
         terminal_block = self._terminal_blocked_attempt(state)
         if terminal_block is not None:
             reason = "blocked"

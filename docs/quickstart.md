@@ -236,6 +236,11 @@ for the GPU. `agate dev`, `agate get/jobs/cancel`, long polling, environment dis
 `tools/sandbox.py` use the same HTTP shapes as atrex-gateway. See [local_gateway.md](local_gateway.md) for
 the exact compatibility surface.
 
+Native Atrex-Bench evaluations automatically split large shape sets into jobs of at most four shapes.
+The sandbox submits every job first, then waits and merges the complete per-shape result. Override the
+bound with `--shape-batch-size` or `ATREX_EVAL_SHAPE_BATCH_SIZE` when needed; local and remote gateways
+both use their normal queues, so one sandbox invocation must not be duplicated while it waits.
+
 This is interface compatibility, not process isolation: submitted code runs directly as the server user.
 Bind it to localhost and submit trusted code only. The worker inherits the server process's Python/toolchain
 environment, so install `torch`, Triton, and any kernel DSL needed by the workload into that environment.

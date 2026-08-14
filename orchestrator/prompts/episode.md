@@ -40,18 +40,6 @@ the supervisor creates it after terminal validation.
 
 {{SANDBOX}}
 
-## Non-negotiable execution boundary
-
-- Never run `python test_kernel.py`, `python kernel.py`, or import GPU/JIT kernel packages directly
-  on the host. Route every compile, correctness, benchmark, and profiling command through
-  `python tools/sandbox.py ... --`.
-- Never start, stop, restart, signal, replace, or mutate the shared gateway service, its screen
-  session, state directory, database, log, or jobs. Report infrastructure failure instead.
-- Never install or build dependencies with pip, uv, conda, setup.py, ninja, cmake, or package-manager
-  commands. Use only the immutable campaign environment.
-- Static source inspection is allowed. Imports or probes that may initialize CUDA/ROCm/JIT code must
-  run through the sandbox.
-
 ## Framework escalation state
 
 {{CONVERSION_DIRECTIVE}}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -305,6 +306,41 @@ class Campaign:
                 "canonical memory lacks complete real-shape performance coverage "
                 f"({len(measured_ids)}/{len(expected_ids)})"
             )
+        if performance.get("measurement_status") != "complete":
+            return "canonical memory measurement_status is not complete"
+        if performance.get("measurement_scope") != "real_evaluator_shapes":
+            return "canonical memory does not identify real evaluator shape measurements"
+        if performance.get("shape_ids_are_opaque") is not True:
+            return "canonical memory does not mark private shape ids as opaque"
+        if performance.get("measured_shape_count") != len(expected_ids):
+            return "canonical memory measured_shape_count does not match private shapes"
+
+        def positive_finite(value: object) -> bool:
+            return (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                and float(value) > 0.0
+            )
+
+        if any(not positive_finite(value) for value in measured.values()):
+            return "canonical memory contains invalid real-shape latency"
+        for metric_name in (
+            "latency_us",
+            "latency_us_geomean",
+            "latency_us_arith_mean",
+            "speedup_vs_ref_geomean",
+        ):
+            if not positive_finite(performance.get(metric_name)):
+                return f"canonical memory performance.{metric_name} is null or invalid"
+        correctness = memory.get("correctness")
+        correctness = correctness if isinstance(correctness, dict) else {}
+        if correctness.get("status") != "PASS":
+            return "canonical memory correctness status is not PASS"
+        quality_gate = memory.get("quality_gate")
+        quality_gate = quality_gate if isinstance(quality_gate, dict) else {}
+        if quality_gate.get("result") != "PASS":
+            return "canonical memory quality gate is not PASS"
         return ""
 
     def _generalized_contract_commit_problem(self) -> str:
@@ -693,9 +729,14 @@ class Campaign:
                 f"baseline ({baseline_problem}). Continue from the files already present and finish V0 "
                 "autonomously. "
                 "Do not ask the user for confirmation or permission. Inspect the current workspace, "
-                "implement `kernel.py`, preserve the evaluator route described below, run the complete "
-                "workspace workload through the mandatory sandbox with `--no-memory`, parse its "
-                "`[test_kernel] RESULT_JSON=...`, write local `memory/v0.json` and `baseline_report.md`, "
+                "implement `kernel.py`, and preserve the evaluator route described below. Reuse an "
+                "existing complete base-seed RESULT_JSON/memory record instead of submitting a duplicate; "
+                "otherwise run the complete workspace workload through the mandatory sandbox with "
+                "`--no-memory` and parse its `[test_kernel] RESULT_JSON=...`. Ensure the required "
+                "`--multi-seed 5` gate has completed successfully, waiting for an already-running check "
+                "rather than launching another. Canonical `memory/v0.json` must contain complete finite "
+                "aggregate and per-shape measurements, `measurement_status=complete`, the exact real-shape "
+                "count, speedup 1.0, correctness PASS, and quality gate PASS. Write `baseline_report.md`, "
                 "then Git commit `V0: baseline kernel`. Do not enter optimization iterations.\n\n"
                 + self._evaluator_directive()
                 + "\n\n"

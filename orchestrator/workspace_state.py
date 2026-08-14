@@ -377,28 +377,3 @@ def peak_util(mem: Optional[dict]) -> float:
     perf = mem.get("performance") or {}
     vals = [perf.get("tflops_peak_utilization_pct"), perf.get("bandwidth_peak_utilization_pct")]
     return max([float(v) for v in vals if isinstance(v, (int, float))] or [0.0])
-
-
-def best_validated_latency_us(workspace: Path, *, from_version: Optional[int] = None) -> Optional[float]:
-    """Best correctness-passing measured latency in a workspace.
-
-    Versions before a pinned framework baseline are excluded by default: production cannot ship
-    the PyTorch V0 wrapper, so treating its (typically much faster, library-backed) latency as the
-    incumbent would reject every candidate a from-scratch DSL kernel can produce.
-    """
-    if from_version is None:
-        _pinned_commit, pinned_version = resolve_framework_baseline_commit(workspace)
-        from_version = pinned_version
-    best: Optional[float] = None
-    for version in range(from_version, latest_version(workspace) + 1):
-        memory = read_memory(workspace, version)
-        if not memory:
-            continue
-        gate = (memory.get("quality_gate") or {}).get("result")
-        correctness = (memory.get("correctness") or {}).get("status")
-        if gate != "PASS" and correctness != "PASS":
-            continue
-        latency = (memory.get("performance") or {}).get("latency_us")
-        if isinstance(latency, (int, float)):
-            best = float(latency) if best is None else min(best, float(latency))
-    return best

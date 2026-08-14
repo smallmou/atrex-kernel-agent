@@ -4,9 +4,16 @@
   "timestamp": "<ISO 8601>",
   "performance": {
     "latency_us": null,
+    "latency_us_geomean": null,
+    "latency_us_arith_mean": null,
     "latency_us_by_shape": {
       "<sid>": "Evaluator-reported latency (us) for every real workload. Generalized private-case Atrex-Bench layouts use opaque shape ids here while keeping each shape's input parameters and failure details private."
     },
+    "measurement_scope": "<real_evaluator_shapes / public_development_cases>",
+    "shape_ids_are_opaque": false,
+    "measurement_status": "<complete / incomplete / unmeasured>",
+    "measured_shape_count": 0,
+    "speedup_vs_ref_geomean": null,
     "tflops": null,
     "bandwidth_gbps": null,
     "tflops_peak_utilization_pct": null,

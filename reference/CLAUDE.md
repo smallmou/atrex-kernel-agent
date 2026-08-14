@@ -77,9 +77,10 @@ and try a different lever. See `orchestrator/prompts/episode.md` and
 `skills/gpu-kernel-episode-loop/SKILL.md` for the full procedure.
 
 Benchmark only the base seed. Every additional seed is a full-shape correctness-only pass;
-do not repeat warmup/timing/reference benchmarking for extra seeds. The public gateway caps
-one command at 600 seconds, and multi-seed robustness must stay within that limit without
-reducing seed or shape coverage.
+do not repeat warmup/timing/reference benchmarking for extra seeds. For large Atrex-Bench
+shape sets, the sandbox enqueues every bounded shape batch before waiting and merges the
+results. One sandbox invocation still covers every shape and emits one result; quiet queue
+time is not a reason to submit the same evaluation again.
 
 ### Cache-hack ZERO-TOLERANCE policy
 

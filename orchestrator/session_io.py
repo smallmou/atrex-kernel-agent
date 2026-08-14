@@ -32,24 +32,6 @@ from .optimization_policy import DependencyReviewSignal
 from .workspace_state import speedup_vs_reference
 
 
-def _status_is(value: object, expected: str) -> bool:
-    """Accept a status even when a CLI accidentally stored it as a JSON-quoted string."""
-    current = value
-    for _ in range(2):
-        if current == expected:
-            return True
-        if not isinstance(current, str):
-            return False
-        try:
-            decoded = json.loads(current)
-        except json.JSONDecodeError:
-            return current.strip() == expected
-        if decoded == current:
-            return False
-        current = decoded
-    return current == expected
-
-
 @dataclass
 class SessionResult:
     exit_status: int

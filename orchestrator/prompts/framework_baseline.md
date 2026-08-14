@@ -16,16 +16,7 @@ Hard rules for this session:
   do not enter optimization iterations — the orchestrator spawns those as separate sessions afterwards.
 - **Do NOT loop.** One pass: research → implement → validate → bench → record → commit, then exit.
 - The whole point of a clean session is a fresh context: you inherit state from disk, not from a prior conversation.
-- **The host GPU boundary is non-negotiable.** Never run `python test_kernel.py`, `python kernel.py`, or
-  `python -c "import kernel"` directly in the workspace, even as a quick smoke/import check. Always route
-  the command through `python tools/sandbox.py ... --`; the orchestrator terminates the whole session on a
-  direct kernel import or execution. Never import or execute `flashinfer`, `flash_attn`/`flash-attn`, or
-  `xformers` or `vllm` on the host either: a preinstalled package can start `ninja`, `ptxas`, or `nvcc` on first use.
-  Inspect their source statically, or route the import/API probe through the sandbox.
-- **The gateway is shared orchestrator-owned infrastructure.** Never start/stop/restart/signal its service or
-  `screen` session, never delete/edit its configured state directory or job database/log, and never cancel gateway jobs
-  directly. If unavailable, record an infrastructure failure and exit; do not repair it from this session.
-- **Preserve optimizer history and ground truth.** Never delete or move Git-tracked workspace files. Never
+- **Preserve optimizer history and ground truth.** Never
   modify `test_kernel.py`, `reference.py`, `input.py`, `agent_problem.json`, `shapes.json`,
   `metadata.json`, `roofline.json`, `valid.py`, `workload.jsonl`, or `memory/v0.json` — the orchestrator restores any of them you edit, so
   changing them only wastes your session. Never create `framework_baseline.json`; the orchestrator owns it.
@@ -52,15 +43,6 @@ Hard rules for this session:
 {{HARDWARE}}
 {{SANDBOX}}
 {{EVALUATOR}}
-
-The campaign dependency environment is immutable. Never run `pip`, `python -m pip`, `uv pip`, `conda`,
-`setup.py`, or any other package installation/build command on the host or through the gateway. Use only
-preinstalled dependencies. If an import is unavailable, record the blocker or choose an implementation that
-uses available tooling; do not install or locally compile a third-party library.
-Do not import or execute JIT-capable GPU package code directly on the host. Even a preinstalled package such
-as `flashinfer`, `flash_attn`/`flash-attn`, `xformers`, or `vllm` can invoke `ninja`, `ptxas`, or `nvcc` on first use.
-Static source inspection is allowed. Route any import/API probe/benchmark that may initialize GPU code
-through `tools/sandbox.py`.
 
 ## Definition of done (the orchestrator mechanically re-checks all of it)
 

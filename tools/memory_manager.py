@@ -50,7 +50,6 @@ Examples:
 
 import argparse
 import json
-import os
 import re
 import sys
 from copy import deepcopy
@@ -65,6 +64,14 @@ SCHEMA_TEMPLATE = {
     "timestamp": None,
     "performance": {
         "latency_us": None,
+        "latency_us_geomean": None,
+        "latency_us_arith_mean": None,
+        "latency_us_by_shape": {},
+        "measurement_scope": None,
+        "shape_ids_are_opaque": False,
+        "measurement_status": "unmeasured",
+        "measured_shape_count": 0,
+        "speedup_vs_ref_geomean": None,
         "tflops": None,
         "bandwidth_gbps": None,
         "tflops_peak_utilization_pct": None,

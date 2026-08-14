@@ -30,19 +30,6 @@ import shutil
 import importlib.util
 
 
-def import_from_file(file_path, name):
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"File does not exist: {file_path}")
-    module_name = os.path.splitext(os.path.basename(file_path))[0]
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    obj = getattr(module, name, None)
-    if obj is None:
-        raise AttributeError(f"'{name}'  in  {file_path}  was not found in ")
-    return obj, module
-
-
 def capture_wrapper_kwargs(module, wrapper_name, setup_name):
     original_wrapper = getattr(module, wrapper_name, None)
     setup_fn = getattr(module, setup_name, None)

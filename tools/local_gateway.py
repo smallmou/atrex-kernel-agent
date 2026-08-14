@@ -1537,9 +1537,6 @@ class LocalGateway:
         }
         return accepted, created
 
-    def submit_dev(self, payload: Any, trace_id: str) -> tuple[dict[str, Any], bool]:
-        return self.submit("dev", payload, trace_id)
-
     def environment(self, force: bool = False) -> dict[str, Any]:
         with self._env_lock:
             if self._env_cache is None or force:

@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from typing import Any
 
 RESULT_PREFIX = "[test_kernel] RESULT_JSON="
 ATREX_BENCH_DIR = "atrex-bench"
+DEFAULT_SHAPE_BATCH_SIZE = 4
 
 
 def _finite_number(value: object) -> float | None:
@@ -42,6 +44,60 @@ def _expected_shape_ids(workspace: Path) -> list[str]:
         return (0, int(shape_id)) if shape_id.isdigit() else (1, shape_id)
 
     return sorted((str(shape_id) for shape_id in payload), key=sort_key)
+
+
+def _shape_batches(shape_ids: list[str], batch_size: int) -> list[list[str]]:
+    if batch_size <= 0:
+        raise ValueError("shape batch size must be positive")
+    return [
+        shape_ids[offset : offset + batch_size]
+        for offset in range(0, len(shape_ids), batch_size)
+    ]
+
+
+def _materialize_reference_batch(
+    workspace: Path, destination: Path, shape_ids: list[str]
+) -> None:
+    shapes = json.loads((workspace / "shapes.json").read_text(encoding="utf-8"))
+    missing = [shape_id for shape_id in shape_ids if shape_id not in shapes]
+    if missing:
+        raise ValueError("unknown shape ids: " + ", ".join(missing))
+    destination.mkdir(parents=True)
+    for source in workspace.iterdir():
+        if source.is_file() and source.name not in {
+            "shapes.json",
+            "metadata.json",
+            "roofline.json",
+        }:
+            shutil.copy2(source, destination / source.name)
+    (destination / "shapes.json").write_text(
+        json.dumps(
+            {shape_id: shapes[shape_id] for shape_id in shape_ids},
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for filename in ("metadata.json", "roofline.json"):
+        source = workspace / filename
+        if not source.is_file():
+            continue
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        entries = payload.get("shapes") if isinstance(payload, dict) else None
+        if isinstance(entries, dict):
+            payload["shapes"] = {
+                shape_id: entries[shape_id]
+                for shape_id in shape_ids
+                if shape_id in entries
+            }
+        if filename == "metadata.json" and isinstance(payload, dict):
+            if "num_shapes" in payload:
+                payload["num_shapes"] = len(shape_ids)
+        (destination / filename).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _compile_failures(compile_result: object, shape_ids: list[str]) -> list[str]:
@@ -174,6 +230,67 @@ def result_from_eval(payload: dict[str, Any], shape_ids: list[str]) -> dict[str,
     }
 
 
+def _merge_batch_results(
+    results: list[dict[str, Any]], expected_shape_ids: list[str]
+) -> dict[str, Any]:
+    failures: list[str] = []
+    latency_by_shape: dict[str, float] = {}
+    eval_ids: list[str] = []
+    max_abs = 0.0
+    max_rel = 0.0
+    for result in results:
+        failures.extend(str(value) for value in (result.get("failures") or []))
+        by_shape = result.get("latency_us_by_shape")
+        by_shape = by_shape if isinstance(by_shape, dict) else {}
+        for shape_id, latency in by_shape.items():
+            if shape_id in latency_by_shape:
+                failures.append(f"sid={shape_id}: duplicate batch measurement")
+            elif not isinstance(latency, (int, float)) or not math.isfinite(latency) or latency <= 0:
+                failures.append(f"sid={shape_id}: invalid batch latency")
+            else:
+                latency_by_shape[str(shape_id)] = float(latency)
+        eval_id = result.get("eval_id")
+        if eval_id is not None:
+            eval_ids.append(str(eval_id))
+        max_abs = max(max_abs, float(result.get("max_abs_err") or 0.0))
+        max_rel = max(max_rel, float(result.get("max_rel_err") or 0.0))
+
+    expected = set(expected_shape_ids)
+    measured = set(latency_by_shape)
+    failures.extend(
+        f"sid={shape_id}: missing batch measurement"
+        for shape_id in sorted(expected - measured)
+    )
+    failures.extend(
+        f"sid={shape_id}: unexpected batch measurement"
+        for shape_id in sorted(measured - expected)
+    )
+    latencies = [
+        latency_by_shape[shape_id]
+        for shape_id in expected_shape_ids
+        if shape_id in latency_by_shape
+    ]
+    complete = len(latencies) == len(expected_shape_ids) and bool(latencies)
+    return {
+        "all_pass": complete and not failures,
+        "failures": failures,
+        "latency_us_geomean": (
+            math.exp(sum(math.log(value) for value in latencies) / len(latencies))
+            if complete
+            else 0.0
+        ),
+        "latency_us_arith_mean": sum(latencies) / len(latencies) if complete else 0.0,
+        "latency_us_by_shape": latency_by_shape,
+        "speedup_vs_ref_geomean": None,
+        "max_abs_err": max_abs,
+        "max_rel_err": max_rel,
+        "evaluator": "atrex-bench/run_eval/batched",
+        "eval_id": eval_ids[-1] if eval_ids else None,
+        "eval_ids": eval_ids,
+        "shape_batch_count": len(results),
+    }
+
+
 def _mask_generalized_result(workspace: Path, result: dict[str, Any]) -> dict[str, Any]:
     """Withhold hidden inputs and failure details while retaining measured shape latency."""
     if not (workspace / "agent_problem.json").is_file():
@@ -206,6 +323,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timed-runs", type=int, default=100)
     parser.add_argument("--candidate-timeout-s", type=float, default=20.0)
     parser.add_argument("--perf-timeout-s", type=float, default=120.0)
+    parser.add_argument(
+        "--shape-id",
+        action="append",
+        dest="shape_ids",
+        help="Evaluate only this opaque shape id (repeatable; supervisor use).",
+    )
+    parser.add_argument(
+        "--shape-batch-size",
+        type=int,
+        default=os.environ.get(
+            "ATREX_EVAL_SHAPE_BATCH_SIZE", str(DEFAULT_SHAPE_BATCH_SIZE)
+        ),
+        help="Maximum shapes per run_eval invocation (default: 4).",
+    )
     return parser
 
 
@@ -213,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.multi_seed < 0:
         raise SystemExit("--multi-seed must be non-negative")
+    if args.shape_batch_size <= 0:
+        raise SystemExit("--shape-batch-size must be positive")
 
     workspace = Path(__file__).resolve().parent
     runtime_root = workspace / ATREX_BENCH_DIR
@@ -224,86 +357,111 @@ def main(argv: list[str] | None = None) -> int:
             f"{evaluator} and {runtime_src / 'atrex_bench'}"
         )
 
-    shape_ids = _expected_shape_ids(workspace)
+    all_shape_ids = _expected_shape_ids(workspace)
+    shape_ids = list(args.shape_ids or all_shape_ids)
+    unknown = [shape_id for shape_id in shape_ids if shape_id not in all_shape_ids]
+    if unknown:
+        raise SystemExit("unknown --shape-id values: " + ", ".join(unknown))
+    batches = _shape_batches(shape_ids, args.shape_batch_size)
     env = os.environ.copy()
     pythonpath = str(runtime_src)
     if env.get("PYTHONPATH"):
         pythonpath += os.pathsep + env["PYTHONPATH"]
     env["PYTHONPATH"] = pythonpath
 
-    with tempfile.TemporaryDirectory(prefix="atrex-eval-") as output_dir:
-        command = [
-            sys.executable,
-            str(evaluator),
-            "--input",
-            str(workspace / "kernel.py"),
-            "--reference-dir",
-            str(workspace),
-            "--output",
-            output_dir,
-            "--atol",
-            str(args.atol),
-            "--rtol",
-            str(args.rtol),
-            "--num-correctness-cases",
-            str(1 + args.multi_seed),
-            "--warmup-iters",
-            str(args.warmup),
-            "--bench-iters",
-            str(args.timed_runs),
-            "--candidate-timeout-s",
-            str(args.candidate_timeout_s),
-            "--perf-timeout-s",
-            str(args.perf_timeout_s),
-        ]
-        completed = subprocess.run(
-            command,
-            cwd=str(runtime_root),
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        # Generalized tasks return only the sanitized transport result below. Keep the
-        # evaluator's raw diagnostics private because future run_eval versions may include
-        # exact inputs or other sensitive per-case context in their output.
-        if not (workspace / "agent_problem.json").is_file():
-            if completed.stdout:
-                print(
-                    completed.stdout,
-                    end="" if completed.stdout.endswith("\n") else "\n",
-                )
-            if completed.stderr:
-                print(
-                    completed.stderr,
-                    end="" if completed.stderr.endswith("\n") else "\n",
-                    file=sys.stderr,
-                )
+    batch_results: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="atrex-eval-") as temp_dir:
+        root = Path(temp_dir)
+        for batch_index, batch_shape_ids in enumerate(batches):
+            reference_dir = root / f"reference-{batch_index:04d}"
+            output_dir = root / f"output-{batch_index:04d}"
+            _materialize_reference_batch(workspace, reference_dir, batch_shape_ids)
+            command = [
+                sys.executable,
+                str(evaluator),
+                "--input",
+                str(workspace / "kernel.py"),
+                "--reference-dir",
+                str(reference_dir),
+                "--output",
+                str(output_dir),
+                "--atol",
+                str(args.atol),
+                "--rtol",
+                str(args.rtol),
+                "--num-correctness-cases",
+                str(1 + args.multi_seed),
+                "--warmup-iters",
+                str(args.warmup),
+                "--bench-iters",
+                str(args.timed_runs),
+                "--candidate-timeout-s",
+                str(args.candidate_timeout_s),
+                "--perf-timeout-s",
+                str(args.perf_timeout_s),
+            ]
+            print(
+                f"[test_kernel] shape batch {batch_index + 1}/{len(batches)} "
+                f"count={len(batch_shape_ids)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            completed = subprocess.run(
+                command,
+                cwd=str(runtime_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            # Generalized tasks return only the sanitized transport result below. Keep the
+            # evaluator's raw diagnostics private because future run_eval versions may include
+            # exact inputs or other sensitive per-case context in their output.
+            if not (workspace / "agent_problem.json").is_file():
+                if completed.stdout:
+                    print(
+                        completed.stdout,
+                        end="" if completed.stdout.endswith("\n") else "\n",
+                    )
+                if completed.stderr:
+                    print(
+                        completed.stderr,
+                        end="" if completed.stderr.endswith("\n") else "\n",
+                        file=sys.stderr,
+                    )
 
-        result_paths = sorted(Path(output_dir).rglob("eval_result.json"))
-        if not result_paths:
-            result = {
-                "all_pass": False,
-                "failures": [
-                    f"atrex-bench run_eval exited {completed.returncode} without eval_result.json"
-                ],
-                "latency_us_geomean": 0.0,
-                "latency_us_arith_mean": 0.0,
-                "latency_us_by_shape": {},
-                "speedup_vs_ref_geomean": None,
-                "max_abs_err": 0.0,
-                "max_rel_err": 0.0,
-                "evaluator": "atrex-bench/run_eval",
-                "eval_id": None,
-            }
-        else:
-            payload = json.loads(result_paths[-1].read_text(encoding="utf-8"))
-            result = result_from_eval(payload, shape_ids)
-            if completed.returncode != 0 and result["all_pass"]:
-                result["all_pass"] = False
-                result["failures"].append(
-                    f"atrex-bench run_eval exited with code {completed.returncode}"
-                )
+            result_paths = sorted(output_dir.rglob("eval_result.json"))
+            if not result_paths:
+                batch_result = {
+                    "all_pass": False,
+                    "failures": [
+                        "atrex-bench run_eval exited "
+                        f"{completed.returncode} without eval_result.json"
+                    ],
+                    "latency_us_geomean": 0.0,
+                    "latency_us_arith_mean": 0.0,
+                    "latency_us_by_shape": {},
+                    "speedup_vs_ref_geomean": None,
+                    "max_abs_err": 0.0,
+                    "max_rel_err": 0.0,
+                    "evaluator": "atrex-bench/run_eval",
+                    "eval_id": None,
+                }
+            else:
+                payload = json.loads(result_paths[-1].read_text(encoding="utf-8"))
+                batch_result = result_from_eval(payload, batch_shape_ids)
+                if completed.returncode != 0 and batch_result["all_pass"]:
+                    batch_result["all_pass"] = False
+                    batch_result["failures"].append(
+                        f"atrex-bench run_eval exited with code {completed.returncode}"
+                    )
+            batch_results.append(batch_result)
+
+    result = (
+        _merge_batch_results(batch_results, shape_ids)
+        if len(batch_results) > 1
+        else batch_results[0]
+    )
 
     result = _mask_generalized_result(workspace, result)
     print(RESULT_PREFIX + json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)

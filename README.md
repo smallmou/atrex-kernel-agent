@@ -66,8 +66,9 @@ operator inputs
 Each canonical version is explored in an isolated Git branch and worktree. A fresh Claude, Qoder,
 Codex, or Pi session owns one Long Horizon episode and may execute multiple engineering cycles before
 publishing a structured terminal handoff. The supervisor validates the journal and candidate, runs
-incumbent/candidate ABBA verification in one gateway allocation, and squash-promotes only a strict
-correctness-passing improvement.
+incumbent/candidate ABBA verification, and squash-promotes only a strict correctness-passing
+improvement. Large native Atrex-Bench shape sets are split into bounded jobs: all jobs enter the
+gateway queue before the supervisor waits, and their per-shape results are merged before scoring.
 
 The uncommitted `memory/live.json` appears when an episode starts and refreshes after every journaled
 experiment. It is an observability view, not promotion evidence; only `memory/v<N>.json` is canonical.

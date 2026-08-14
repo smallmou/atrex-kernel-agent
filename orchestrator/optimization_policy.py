@@ -7,7 +7,6 @@ import io
 import json
 import pkgutil
 import re
-import subprocess
 import sys
 import sysconfig
 import tokenize
@@ -542,45 +541,3 @@ def production_kernel_violations(
                 else:
                     errors.extend(review_errors)
     return list(dict.fromkeys(errors))
-
-
-def reject_production_commit(
-    workspace: Path,
-    version: int,
-    pre_head: str,
-    violations: list[str],
-) -> Path:
-    """Revert a violating kernel commit and preserve an actionable local record."""
-    memory_path = workspace / "memory" / f"v{version}.json"
-    try:
-        memory = json.loads(memory_path.read_text(encoding="utf-8")) if memory_path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        memory = {}
-    if pre_head:
-        subprocess.run(
-            ["git", "reset", "--hard", pre_head],
-            cwd=str(workspace),
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory["version"] = f"v{version}"
-    memory["masked"] = False
-    memory["git_commit_hash"] = None
-    memory["quality_gate"] = {
-        "result": "FAIL",
-        "failure_reason": "production policy violation: " + "; ".join(violations),
-    }
-    memory["optimization"] = {
-        "action_category": "production_policy_rejection",
-        "action_description": "reverted candidate that used a forbidden dependency or wrong framework",
-    }
-    pitfalls = memory.setdefault("pitfalls_and_fixes", [])
-    pitfalls.append({
-        "error_type": "production_policy",
-        "error_message": "; ".join(violations),
-        "lesson": "implement the candidate directly and exclusively in the selected framework",
-    })
-    memory_path.write_text(json.dumps(memory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return memory_path

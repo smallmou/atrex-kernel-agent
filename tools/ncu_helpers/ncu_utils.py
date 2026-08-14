@@ -728,7 +728,7 @@ def is_additive(action, name):
 
 def _kernel_demangled(action):
     try:
-        nr = _import_ncu_report()
+        _import_ncu_report()
         base = getattr(action, "NameBase_DEMANGLED", None)
         if base is not None:
             return action.name(base)

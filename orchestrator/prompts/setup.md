@@ -6,17 +6,9 @@ This is an authorized, non-interactive job. **Never ask the user whether to cont
 confirmation.** Work autonomously until the required `memory/v0.json` and V0 Git commit both exist, or
 report a concrete technical blocker after exhausting the available in-scope fixes.
 
-The gateway is shared infrastructure owned by the orchestrator/monitor. Never start, stop, restart, signal,
-or replace its service or `screen` session; never delete/edit its configured state directory, job database/log, or cancel
-gateway jobs directly. If the endpoint is unavailable, report an infrastructure failure and exit; do not
-attempt to repair the gateway from this coding session.
-
 The workspace already exists at your cwd (`{{WORKSPACE}}`) — it was created by the orchestrator
 (`workspace_init.sh` already ran: directory structure, git, and `kernel.py` are in place).
 **Do NOT re-run `workspace_init.sh`.**
-Never delete or move Git-tracked workspace state (`memory/`, `roofline.json`, helpers, historical plans or
-profiles). Sandbox input filtering is owned by `tools/sandbox.py`; deleting campaign history to reduce a
-payload is forbidden.
 
 Environment (resolve all paths against your cwd = the workspace):
 - `tools/`, `reference/`, `skills/`, `reference-projects/`, and `gpu-wiki/` are symlinked into the workspace — read/use them by relative path
@@ -26,15 +18,6 @@ Environment (resolve all paths against your cwd = the workspace):
 {{HARDWARE}}
 {{SANDBOX}}
 {{EVALUATOR}}
-
-The campaign dependency environment is immutable. Never run `pip`, `python -m pip`, `uv pip`, `conda`,
-`setup.py`, or any other package installation/build command on the host or through the gateway. Use only
-preinstalled dependencies. If an import is unavailable, record the blocker or choose an implementation that
-uses available tooling; do not install or locally compile a third-party library.
-Do not import or execute JIT-capable GPU package code directly on the host. Even a preinstalled package such
-as `flashinfer`, `flash_attn`/`flash-attn`, `xformers`, or `vllm` can invoke `ninja`, `ptxas`, or `nvcc` on first use.
-Static source inspection is allowed. Route any import/API probe/benchmark that may initialize GPU code
-through `tools/sandbox.py`.
 
 Do the following, in order, but only through baseline:
 
@@ -54,7 +37,12 @@ Do the following, in order, but only through baseline:
    written memory. The test must cover the evaluator's complete workload—hidden cases for a generalized
    `agent_problem.json`, or every legacy `shapes.json` entry—and record the aggregate result and complete
    real `latency_us_by_shape` map. Generalized tasks expose only opaque shape ids and their measured
-   latency; exact shape inputs and failure details remain private. Do not edit an evaluator adapter supplied by the orchestrator. A derived legacy boundary may create
+   latency; exact shape inputs and failure details remain private. Canonical V0 must also record
+   `latency_us_geomean`, `latency_us_arith_mean`, `measurement_scope=real_evaluator_shapes`,
+   `measurement_status=complete`, `measured_shape_count`, `shape_ids_are_opaque`,
+   `speedup_vs_ref_geomean=1.0`, `correctness.status=PASS`, and `quality_gate.result=PASS` from the
+   authoritative `RESULT_JSON`. Never commit a partial/null aggregate or a map with missing workloads.
+   Do not edit an evaluator adapter supplied by the orchestrator. A derived legacy boundary may create
    its harness only before V0, then must commit and preserve it unchanged.
 
 Then **STOP**. Do **NOT** enter Stage 2 / any optimization iteration — the orchestrator spawns those as

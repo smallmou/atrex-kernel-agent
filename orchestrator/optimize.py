@@ -57,93 +57,47 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Direct script execution and package imports must share one module identity. The episode engine
-# imports ``orchestrator.optimize`` lazily; expose the repository root and bind this live module
-# into the namespace package so ``python orchestrator/optimize.py`` cannot load a second copy.
+# Direct script execution (python orchestrator/optimize.py) has no package context; make the
+# repository root importable so the absolute `orchestrator.*` imports below resolve.
 if __name__ == "__main__":
     _repo_import_root = str(Path(__file__).resolve().parent.parent)
     if _repo_import_root not in sys.path:
         sys.path.insert(0, _repo_import_root)
-    import orchestrator as _orchestrator_package
 
-    sys.modules["orchestrator.optimize"] = sys.modules[__name__]
-    setattr(_orchestrator_package, "optimize", sys.modules[__name__])
-
-try:
-    from . import agent_runtime as _agent_runtime
-    from .campaign import Campaign
-    from .constants import (
-        AGENT_CLI_CHOICES,
-        DEFAULT_CONVERT_AFTER,
-        DEFAULT_HANDOFF_RESUMES,
-        DEFAULT_SANDBOX_TIMEOUT,
-        DEFAULT_VERIFY_REPEATS,
-        DEFAULT_VERIFY_RUN_TIMEOUT,
-        FRAMEWORK_BASELINE_MODES,
-        FRAMEWORK_BASELINE_TIMEOUT_S,
-        MAX_SANDBOX_TIMEOUT,
-    )
-    from .hardware import (
-        _workspace_slug,
-        framework_workspace_suffix,
-        supported_frameworks,
-    )
-    from .optimization_policy import OPTIMIZATION_MODE_CHOICES
-    from .session_io import detect_arch, ensure_submodules
-    from .operator_layout import (
-        AGENT_PROBLEM_FILENAME,
-        find_atrex_bench_root,
-        has_agent_problem,
-        is_sol_op,
-        should_use_generalized_problem,
-        validate_agent_problem,
-        validate_private_shapes,
-    )
-    from .workspace_state import (
-        latest_version,
-        preserve_interrupted_tracked_changes,
-        read_memory,
-    )
-except ImportError:  # direct script execution: python orchestrator/optimize.py
-    from orchestrator import agent_runtime as _agent_runtime  # type: ignore[no-redef]
-    from orchestrator.campaign import Campaign  # type: ignore[no-redef]
-    from orchestrator.constants import (  # type: ignore[no-redef]
-        AGENT_CLI_CHOICES,
-        DEFAULT_CONVERT_AFTER,
-        DEFAULT_HANDOFF_RESUMES,
-        DEFAULT_SANDBOX_TIMEOUT,
-        DEFAULT_VERIFY_REPEATS,
-        DEFAULT_VERIFY_RUN_TIMEOUT,
-        FRAMEWORK_BASELINE_MODES,
-        FRAMEWORK_BASELINE_TIMEOUT_S,
-        MAX_SANDBOX_TIMEOUT,
-    )
-    from orchestrator.hardware import (  # type: ignore[no-redef]
-        _workspace_slug,
-        framework_workspace_suffix,
-        supported_frameworks,
-    )
-    from orchestrator.optimization_policy import (  # type: ignore[no-redef]
-        OPTIMIZATION_MODE_CHOICES,
-    )
-    from orchestrator.session_io import (  # type: ignore[no-redef]
-        detect_arch,
-        ensure_submodules,
-    )
-    from orchestrator.operator_layout import (  # type: ignore[no-redef]
-        AGENT_PROBLEM_FILENAME,
-        find_atrex_bench_root,
-        has_agent_problem,
-        is_sol_op,
-        should_use_generalized_problem,
-        validate_agent_problem,
-        validate_private_shapes,
-    )
-    from orchestrator.workspace_state import (  # type: ignore[no-redef]
-        latest_version,
-        preserve_interrupted_tracked_changes,
-        read_memory,
-    )
+from orchestrator import agent_runtime as _agent_runtime
+from orchestrator.campaign import Campaign
+from orchestrator.constants import (
+    AGENT_CLI_CHOICES,
+    DEFAULT_CONVERT_AFTER,
+    DEFAULT_HANDOFF_RESUMES,
+    DEFAULT_SANDBOX_TIMEOUT,
+    DEFAULT_VERIFY_REPEATS,
+    DEFAULT_VERIFY_RUN_TIMEOUT,
+    FRAMEWORK_BASELINE_MODES,
+    FRAMEWORK_BASELINE_TIMEOUT_S,
+    MAX_SANDBOX_TIMEOUT,
+)
+from orchestrator.hardware import (
+    _workspace_slug,
+    framework_workspace_suffix,
+    supported_frameworks,
+)
+from orchestrator.optimization_policy import OPTIMIZATION_MODE_CHOICES
+from orchestrator.session_io import detect_arch, ensure_submodules
+from orchestrator.operator_layout import (
+    AGENT_PROBLEM_FILENAME,
+    find_atrex_bench_root,
+    has_agent_problem,
+    is_sol_op,
+    should_use_generalized_problem,
+    validate_agent_problem,
+    validate_private_shapes,
+)
+from orchestrator.workspace_state import (
+    latest_version,
+    preserve_interrupted_tracked_changes,
+    read_memory,
+)
 
 
 def _without_cli_options(argv: list[str], option_names: tuple[str, ...]) -> list[str]:
@@ -354,11 +308,7 @@ def _resolve_op(op_dir: str, optimization_mode: str = "leaderboard") -> dict:
     return {
         "name": d.name,
         "reference": str(ref),
-        "op_dir": str(d),
         "atrex_bench_root": atrex_bench_root,
-        "agent_problem": (
-            str(d / AGENT_PROBLEM_FILENAME) if generalized and provided_problem else ""
-        ),
         "agent_problem_source": (
             "provided"
             if generalized and provided_problem
@@ -568,24 +518,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         ap.error("--sandbox-url and --sandbox-profile are mutually exclusive")
     if shutil.which(args.agent_cli) is None:
         ap.error(f"--agent-cli executable not found on PATH: {args.agent_cli}")
-    if args.agent_cli == "codex":
-        codex_settings = (
-            os.environ.get("ATREX_CODEX_SESSION_SETTINGS")
+    settings_validators = {
+        "codex": _agent_runtime.codex_settings_args,
+        "pi": _agent_runtime.pi_settings_args,
+    }
+    settings_validator = settings_validators.get(args.agent_cli)
+    if settings_validator is not None:
+        session_settings = (
+            os.environ.get(f"ATREX_{args.agent_cli.upper()}_SESSION_SETTINGS")
             or os.environ.get("ATREX_SESSION_SETTINGS")
             or ""
         )
         try:
-            _agent_runtime.codex_settings_args(codex_settings)
-        except ValueError as exc:
-            ap.error(str(exc))
-    if args.agent_cli == "pi":
-        pi_settings = (
-            os.environ.get("ATREX_PI_SESSION_SETTINGS")
-            or os.environ.get("ATREX_SESSION_SETTINGS")
-            or ""
-        )
-        try:
-            _agent_runtime.pi_settings_args(pi_settings)
+            settings_validator(session_settings)
         except ValueError as exc:
             ap.error(str(exc))
     if args.agent_cli == "qodercli" and args.token_budget > 0:
@@ -667,11 +612,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         min_improvement_pct=args.min_improvement_pct,
         convert_after=args.convert_after,
     )
-    if latest_version(campaign.workspace) < 0:
+    resume_version = latest_version(campaign.workspace)
+    if resume_version < 0:
         campaign.setup_baseline()
     else:
         print(
-            f"[orchestrator] resuming workspace at v{latest_version(campaign.workspace)}",
+            f"[orchestrator] resuming workspace at v{resume_version}",
             flush=True,
         )
         preserve_interrupted_tracked_changes(campaign.workspace, "resume workspace")

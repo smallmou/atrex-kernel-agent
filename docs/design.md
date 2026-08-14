@@ -116,7 +116,8 @@ runtime-detected GPU vendor.
 4. Validate its structured journal and `candidate_ready`, `pivot`, or `blocked` handoff, with
    bounded same-thread recovery for Claude and Codex.
 5. Check protected paths, clean worktree state, exact candidate commit, and production policy.
-6. Independently compare a valid candidate with the incumbent in one ABBA allocation.
+6. Independently compare a valid candidate with the incumbent using ABBA; large native shape
+   sets enqueue one allocation per bounded batch and merge all rows before scoring.
 7. Squash-promote only a strict correctness-passing improvement; otherwise commit only canonical
    failure/pivot/block evidence.
 8. Stop on version budget, token budget, optional stall budget, target utilization, or a terminal
