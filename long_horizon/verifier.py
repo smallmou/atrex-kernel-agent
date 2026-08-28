@@ -249,16 +249,24 @@ def score_verification_payload(
     schedule: list[dict[str, int | str]],
     repeats: int,
     min_improvement_pct: float,
+    policy: str = "strict_promotion",
     artifact: str = "",
 ) -> VerificationResult:
+    if policy not in {"strict_promotion", "refactor_checkpoint"}:
+        raise ValueError(f"unsupported verification policy: {policy}")
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         return VerificationResult(
-            "ERROR", None, None, None, error="unsupported result schema"
+            "ERROR", None, None, None, error="unsupported result schema", policy=policy
         )
     rows = payload.get("runs")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return VerificationResult(
-            "ERROR", None, None, None, error="runs must be a list of objects"
+            "ERROR",
+            None,
+            None,
+            None,
+            error="runs must be a list of objects",
+            policy=policy,
         )
     runs = [
         VerificationRun(
@@ -280,6 +288,7 @@ def score_verification_payload(
             runs=runs,
             error=str(payload["error"]),
             artifact=artifact,
+            policy=policy,
         )
     actual = [{"revision": run.revision, "repeat": run.repeat} for run in runs]
     if actual != schedule:
@@ -291,6 +300,7 @@ def score_verification_payload(
             runs=runs,
             error="remote verifier did not execute the exact ABBA schedule",
             artifact=artifact,
+            policy=policy,
         )
     candidate_latency_values = [
         value
@@ -347,13 +357,16 @@ def score_verification_payload(
             artifact=artifact,
             candidate_performance_score=candidate_score,
             incumbent_performance_score=incumbent_score,
+            policy=policy,
         )
     improvement = (
         ((candidate_score / incumbent_score) - 1.0) * 100.0
         if candidate_score and incumbent_score
         else None
     )
-    if improvement is None or improvement <= min_improvement_pct:
+    if policy == "strict_promotion" and (
+        improvement is None or improvement <= min_improvement_pct
+    ):
         return VerificationResult(
             "FAIL",
             candidate_latency,
@@ -367,6 +380,7 @@ def score_verification_payload(
             artifact=artifact,
             candidate_performance_score=candidate_score,
             incumbent_performance_score=incumbent_score,
+            policy=policy,
         )
     return VerificationResult(
         "PASS",
@@ -377,6 +391,7 @@ def score_verification_payload(
         artifact=artifact,
         candidate_performance_score=candidate_score,
         incumbent_performance_score=incumbent_score,
+        policy=policy,
     )
 
 
@@ -442,7 +457,10 @@ class GatewayABBAValidator:
         base_commit: str,
         candidate_commit: str,
         changed_paths: list[str],
+        policy: str = "strict_promotion",
     ) -> VerificationResult:
+        if policy not in {"strict_promotion", "refactor_checkpoint"}:
+            raise ValueError(f"unsupported verification policy: {policy}")
         schedule = verification_schedule(self.repeats)
         if self.per_run_timeout * len(schedule) + 30 > self.timeout:
             return VerificationResult(
@@ -451,6 +469,7 @@ class GatewayABBAValidator:
                 None,
                 None,
                 error="ABBA schedule cannot fit in one gateway allocation timeout",
+                policy=policy,
             )
         shape_batches, expected_shape_ids = _verification_shape_batches(
             workspace, self.private_reference_dir, self.shape_batch_size
@@ -555,6 +574,7 @@ class GatewayABBAValidator:
                 None,
                 None,
                 error=f"gateway ABBA verification failed: {exc}",
+                policy=policy,
             )
 
         result_path = directory / "result.json"
@@ -567,11 +587,13 @@ class GatewayABBAValidator:
                 None,
                 None,
                 error=f"cannot persist gateway ABBA result: {type(exc).__name__}: {exc}",
+                policy=policy,
             )
         return score_verification_payload(
             payload,
             schedule=schedule,
             repeats=self.repeats,
             min_improvement_pct=self.min_improvement_pct,
+            policy=policy,
             artifact=str(result_path),
         )

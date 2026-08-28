@@ -194,7 +194,8 @@ python orchestrator/optimize.py \
 The runtime architecture is authoritative for vendor selection. NVIDIA dispatches Triton, CuteDSL, and
 Cuda; AMD dispatches Triton and FlyDSL; unknown hardware dispatches Triton. Leaderboard workspaces use
 flat names such as `/path/to/runs/kernel_opt_<name>_triton_h20`; production workspaces append
-`_production`. `--max-iters` and `--token-budget` apply independently to each framework campaign.
+`_production`. `--max-iters`, `--token-budget`, and an eligible refactor-route budget apply
+independently to each framework campaign.
 Passing `--framework` selects one campaign but keeps the same mode-specific naming convention.
 Every campaign optimizes the complete workload set in one version line.
 
@@ -249,7 +250,7 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
 ### Common options
 
 ```text
---max-iters N                    Hard cap on canonical versions/episodes
+--max-iters N                    Normal-mode canonical version/episode cap
 --fast-episodes N                Fast post-baseline episodes (default: 2; 0 disables)
 --token-budget N                 Hard token cap across episode turns (0 = no cap)
 --agent-cli CLI                  claude (default), qodercli, codex, or pi
@@ -274,6 +275,9 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
 --sandbox-timeout S              Remote command timeout, at most 600 seconds
 --workspace DIR                  Campaign parent directory (default: current directory)
 --max-stall N                    Stop after N unpromoted episodes (0 = disabled)
+--refactor-after-episodes N      Effective episodes before refactor-route eligibility (default: 100)
+--refactor-stall-threshold N     Consecutive effective stalls required for a route (default: 10)
+--refactor-max-episodes N        Dedicated budget for one refactor route (default: 100)
 --convert-after N                Triton stalls before mandatory Gluon conversion (default: 3)
 --handoff-resumes N              Same-thread incomplete-handoff recovery turns (default: 2)
 --verify-repeats N               Full-mode ABBA repeat pairs (default: 2)
@@ -284,7 +288,7 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
 
 Run `python orchestrator/optimize.py --help` for the complete current interface. Some Qoder models
 report zero token usage in stream JSON; in that case `--token-budget` cannot be enforced, so
-`--max-iters` remains the hard campaign bound.
+`--max-iters` plus the separately bounded refactor-route budget remain the episode bounds.
 
 Optimization episodes have no wall-clock deadline: an episode runs until it publishes a terminal
 handoff or its coding-agent process exits. `memory/live.json` exposes progress during a long active
@@ -316,4 +320,6 @@ Each optimization workspace records the full optimization trail:
 - `plans/`: evidence-based optimization plans
 - `profiles/`: profiler artifacts and extracted bottleneck evidence
 - `.atrex_long_horizon/`: restart state, journals, handoffs, telemetry, and archived attempts
+- `.atrex_long_horizon/routes/<route-id>/episodes/`: complete per-episode refactor-route ledger
+- `refs/atrex/refactor/<route-id>`: persistent head of an active or archived non-monotonic route
 - `submission.json`: SOL-ExecBench submission output for SOL campaigns

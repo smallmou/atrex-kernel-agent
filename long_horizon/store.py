@@ -71,6 +71,16 @@ class CampaignStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def route_dir(self, route_id: str) -> Path:
+        if not route_id or any(
+            not (character.isalnum() or character in "-_.")
+            for character in route_id
+        ):
+            raise ValueError("route_id contains unsupported path characters")
+        path = self.root / "routes" / route_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def load_state(self) -> SupervisorState:
         try:
             return SupervisorState.from_dict(json.loads(self.state_path.read_text(encoding="utf-8")))
@@ -102,6 +112,30 @@ class CampaignStore:
         path = self.episode_dir(episode) / "attempt.json"
         atomic_write_json(path, value)
         return path
+
+    def archive_route_episode(
+        self,
+        route_id: str,
+        episode: int,
+        value: dict[str, Any],
+    ) -> Path:
+        directory = self.route_dir(route_id) / "episodes"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"e{episode:04d}.json"
+        atomic_write_json(path, value)
+        return path
+
+    def load_route_episode(
+        self,
+        route_id: str,
+        episode: int,
+    ) -> dict[str, Any] | None:
+        path = self.route_dir(route_id) / "episodes" / f"e{episode:04d}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
 
     def archive_telemetry(self, episode: int, value: dict[str, Any]) -> Path:
         directory = self.episode_dir(episode)

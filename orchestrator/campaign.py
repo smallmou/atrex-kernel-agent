@@ -157,6 +157,9 @@ class Campaign:
     target_util: float = 90.0
     setup_timeout: int = 7200  # 120 min for the baseline session
     max_stall: int = 0  # 0 = disabled; >0 = stop after N unpromoted episodes
+    refactor_after_episodes: int = 100
+    refactor_stall_threshold: int = 10
+    refactor_max_episodes: int = 100
     fast_episodes: int = DEFAULT_FAST_EPISODES  # first N post-baseline episodes
     fast_trials: int = DEFAULT_FAST_TRIALS  # trials per fast episode
     convert_after: int = (
@@ -2857,6 +2860,9 @@ class Campaign:
             token_budget=self.token_budget,
             handoff_resumes=self.handoff_resumes,
             max_stall=self.max_stall,
+            refactor_after_episodes=self.refactor_after_episodes,
+            refactor_stall_threshold=self.refactor_stall_threshold,
+            refactor_max_episodes=self.refactor_max_episodes,
             verifier=verifier,
             session_runner=LongSessionRunner(agent_cli=self.agent_cli),
         )

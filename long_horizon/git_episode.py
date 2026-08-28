@@ -60,6 +60,21 @@ def git_head(workspace: Path) -> str:
     return git_text(workspace, "rev-parse", "HEAD")
 
 
+def kernel_blob(workspace: Path, revision: str = "HEAD") -> str:
+    return git_text(workspace, "rev-parse", f"{revision}:kernel.py")
+
+
+def update_refactor_route(
+    workspace: Path,
+    *,
+    route_id: str,
+    commit: str,
+) -> str:
+    ref = f"refs/atrex/refactor/{route_id}"
+    _git(workspace, "update-ref", ref, commit)
+    return ref
+
+
 def working_changes(workspace: Path) -> list[str]:
     # Porcelain status uses its first two columns for XY state.  Preserve the
     # leading space on an unstaged first entry; git_text().strip() would remove

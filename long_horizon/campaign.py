@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,8 +20,10 @@ from .git_episode import (
     EpisodeWorktree,
     git_head,
     git_text,
+    kernel_blob,
     promote_candidate,
     record_episode_outcome,
+    update_refactor_route,
     working_changes,
 )
 from .journal import initialize as initialize_journal
@@ -30,7 +33,10 @@ from .journal import validate_terminal
 from orchestrator.constants import DEFAULT_FAST_EPISODES, DEFAULT_FAST_TRIALS
 
 from .models import (
+    CandidateAssessment,
     EpisodeHandoff,
+    STATE_ROUTE_COMPLETED_WORK_LIMIT as ROUTE_COMPLETED_WORK_LIMIT,
+    STATE_ROUTE_HISTORY_LIMIT as ROUTE_STATE_HISTORY_LIMIT,
     SupervisorState,
     VerificationResult,
     VerificationRun,
@@ -45,6 +51,7 @@ from .verifier import GatewayABBAValidator
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = MODULE_ROOT / "orchestrator" / "prompts" / "episode.md"
 FAST_PROMPT_PATH = MODULE_ROOT / "orchestrator" / "prompts" / "fast_episode.md"
+REFACTOR_PROMPT_PATH = MODULE_ROOT / "orchestrator" / "prompts" / "refactor_episode.md"
 EVIDENCE_PREFIXES = ("plans/", "profiles/")
 MEMORY_EXPERIMENT_FIELDS = (
     "name",
@@ -62,12 +69,51 @@ FAST_POLICY_REVIEW_REQUEST_PATH = Path(
 )
 FAST_REASONING_EFFORT = "max"
 FULL_REASONING_EFFORT = "max"
+ROUTE_PROMPT_HISTORY_LIMIT = 5
+ROUTE_PLAN_LIST_LIMIT = 20
 
 
 def _render(template: str, values: dict[str, object]) -> str:
     for key, value in values.items():
         template = template.replace("{{" + key + "}}", str(value))
     return template
+
+
+def _compact_route_plan(
+    current: dict[str, Any],
+    proposed: object,
+) -> dict[str, Any]:
+    source = proposed if isinstance(proposed, dict) and proposed else {}
+    result: dict[str, Any] = {}
+    for key in ("objective", "next_task"):
+        value = source.get(key)
+        if not isinstance(value, str):
+            value = current.get(key, "")
+        result[key] = value
+    for key in ("milestones", "invariants"):
+        value = source.get(key)
+        if not isinstance(value, list):
+            value = current.get(key, [])
+        result[key] = list(value[:ROUTE_PLAN_LIST_LIMIT]) if isinstance(value, list) else []
+    return result
+
+
+def _route_prompt_progress(progress: object) -> dict[str, Any]:
+    if not isinstance(progress, dict):
+        return {}
+    completed_work = progress.get("completed_work")
+    if not isinstance(completed_work, list):
+        completed_work = []
+    history = progress.get("history")
+    if not isinstance(history, list):
+        history = []
+    return {
+        "completed_work": completed_work[-ROUTE_COMPLETED_WORK_LIMIT:],
+        "current_milestone": progress.get("current_milestone", ""),
+        "next_task": progress.get("next_task", ""),
+        "history_count": progress.get("history_count", 0),
+        "recent_history": history[-ROUTE_PROMPT_HISTORY_LIMIT:],
+    }
 
 
 def _iso_timestamp(value: str) -> float:
@@ -389,6 +435,9 @@ class LongHorizonCampaign:
     token_budget: int = 0
     handoff_resumes: int = 2
     max_stall: int = 0
+    refactor_after_episodes: int = 100
+    refactor_stall_threshold: int = 10
+    refactor_max_episodes: int = 100
     verifier: GatewayABBAValidator | None = None
     session_runner: LongSessionRunner | None = None
     worktree_root: Path | None = None
@@ -398,18 +447,321 @@ class LongHorizonCampaign:
             raise ValueError("fast_episodes must be non-negative")
         if self.fast_trials < 1:
             raise ValueError("fast_trials must be positive")
+        if self.refactor_after_episodes < 0:
+            raise ValueError("refactor_after_episodes must be non-negative")
+        if self.refactor_stall_threshold < 0:
+            raise ValueError("refactor_stall_threshold must be non-negative")
+        if self.refactor_max_episodes < 0:
+            raise ValueError("refactor_max_episodes must be non-negative")
 
     @property
     def workspace(self) -> Path:
         return self.base_campaign.workspace
 
+    def _refactor_enabled(self) -> bool:
+        return bool(
+            self.refactor_after_episodes
+            and self.refactor_stall_threshold
+            and self.refactor_max_episodes
+        )
+
+    def _refactor_trigger_ready(
+        self,
+        state: SupervisorState,
+        *,
+        conversion_pending: bool,
+    ) -> bool:
+        if not self._refactor_enabled() or state.mode != "normal":
+            return False
+        if conversion_pending:
+            return False
+        if state.effective_episodes < self.refactor_after_episodes:
+            return False
+        if state.consecutive_effective_stall < self.refactor_stall_threshold:
+            return False
+        return state.last_refactor_best_kernel != kernel_blob(self.workspace)
+
+    def _start_refactor_route(
+        self,
+        store: CampaignStore,
+        state: SupervisorState,
+    ) -> None:
+        base_commit = git_head(self.workspace)
+        route_id = uuid.uuid4().hex
+        canonical = _latest_complete_canonical_performance(
+            self.workspace,
+            before_version=main_adapter.latest_version(self.workspace) + 1,
+            expected_shape_ids=self._expected_shape_ids(),
+            required_performance_objective="shape_speedup_arithmetic_mean",
+        )
+        global_score = (
+            float(canonical[0]["performance_score"])
+            if canonical is not None
+            else None
+        )
+        update_refactor_route(
+            self.workspace,
+            route_id=route_id,
+            commit=base_commit,
+        )
+        state.mode = "refactor"
+        state.route_id = route_id
+        state.route_base_commit = base_commit
+        state.route_head_commit = base_commit
+        state.route_best_commit = base_commit
+        state.route_started_episode = state.episodes + 1
+        state.route_used_episodes = 0
+        state.route_remaining_episodes = self.refactor_max_episodes
+        state.route_global_best_score = global_score
+        state.route_best_score = global_score
+        state.route_exit_reason = ""
+        state.route_plan = {
+            "objective": "escape the current local optimum through a coherent architectural refactor",
+            "milestones": [],
+            "invariants": [
+                "full correctness must pass for every route checkpoint",
+                "production framework and dependency policy remains mandatory",
+                "the stable global-best kernel is never replaced by a slower checkpoint",
+            ],
+            "next_task": "produce and begin the reviewed refactor plan",
+        }
+        state.route_progress = {
+            "completed_work": [],
+            "current_milestone": "route planning",
+            "next_task": "produce and begin the reviewed refactor plan",
+            "history": [],
+            "history_count": 0,
+        }
+        store.save_state(state)
+        print(
+            "[long-horizon] ENTER refactor route "
+            f"id={route_id} base={base_commit[:12]} budget={self.refactor_max_episodes}",
+            flush=True,
+        )
+
+    def _finish_refactor_route(
+        self,
+        state: SupervisorState,
+        *,
+        reason: str,
+    ) -> None:
+        state.mode = "normal"
+        state.route_exit_reason = reason
+        if reason == "surpassed_global_best":
+            state.last_refactor_best_kernel = ""
+            state.consecutive_effective_stall = 0
+        else:
+            state.last_refactor_best_kernel = kernel_blob(self.workspace)
+        print(
+            "[long-horizon] EXIT refactor route "
+            f"id={state.route_id} reason={reason} used={state.route_used_episodes}",
+            flush=True,
+        )
+
+    @staticmethod
+    def _attempt_is_effective(
+        *,
+        status: str,
+        violation: str,
+        verification: VerificationResult | None,
+    ) -> bool:
+        if violation:
+            return False
+        if status == "pivot":
+            return True
+        return bool(
+            status == "candidate_ready"
+            and verification is not None
+            and verification.gate in {"PASS", "FAIL"}
+        )
+
+    def _update_refactor_ledger(
+        self,
+        state: SupervisorState,
+        *,
+        episode: int,
+        route_parent_commit: str,
+        candidate_commit: str,
+        checkpoint_accepted: bool,
+        verification: VerificationResult | None,
+        journal: dict[str, Any],
+    ) -> dict[str, Any]:
+        outcome = journal.get("outcome")
+        if not isinstance(outcome, dict):
+            outcome = {}
+        proposed_plan = outcome.get("route_plan")
+        state.route_plan = _compact_route_plan(state.route_plan, proposed_plan)
+        previous_progress = state.route_progress
+        proposed_progress = outcome.get("route_progress")
+        if isinstance(proposed_progress, dict) and proposed_progress:
+            progress = dict(proposed_progress)
+        else:
+            progress = dict(previous_progress)
+            completed = progress.get("completed_work")
+            if not isinstance(completed, list):
+                completed = []
+            summary = str(outcome.get("summary", "")).strip()
+            if summary and (not completed or completed[-1] != summary):
+                completed.append(summary)
+            progress["completed_work"] = completed
+            directions = outcome.get("next_directions")
+            if isinstance(directions, list) and directions:
+                progress["next_task"] = directions[0]
+        completed = progress.get("completed_work")
+        if not isinstance(completed, list):
+            completed = previous_progress.get("completed_work")
+        if not isinstance(completed, list):
+            completed = []
+        current_milestone = progress.get("current_milestone")
+        if not isinstance(current_milestone, str):
+            current_milestone = previous_progress.get("current_milestone", "")
+        if not isinstance(current_milestone, str):
+            current_milestone = ""
+        next_task = progress.get("next_task")
+        if not isinstance(next_task, str):
+            next_task = previous_progress.get("next_task", "")
+        if not isinstance(next_task, str):
+            next_task = ""
+        previous_history_count = previous_progress.get("history_count", 0)
+        if not isinstance(previous_history_count, int) or previous_history_count < 0:
+            previous_history_count = 0
+        history = previous_progress.get("history")
+        if not isinstance(history, list):
+            history = []
+        history_contains_episode = any(
+            isinstance(entry, dict) and entry.get("episode") == episode
+            for entry in history
+        )
+        history = [
+            entry
+            for entry in history
+            if not isinstance(entry, dict) or entry.get("episode") != episode
+        ]
+        candidate_score = (
+            verification.candidate_performance_score
+            if verification is not None
+            else None
+        )
+        global_score = state.route_global_best_score
+        candidate_vs_global = (
+            (candidate_score / global_score - 1.0) * 100.0
+            if isinstance(candidate_score, (int, float))
+            and isinstance(global_score, (int, float))
+            and global_score > 0.0
+            else None
+        )
+        history.append(
+            {
+                "episode": episode,
+                "checkpoint_commit": candidate_commit or None,
+                "checkpoint_accepted": checkpoint_accepted,
+                "candidate_vs_route_parent_pct": (
+                    verification.improvement_pct if verification is not None else None
+                ),
+                "candidate_vs_global_best_pct": candidate_vs_global,
+                "summary": outcome.get("summary"),
+                "next_directions": outcome.get("next_directions"),
+            }
+        )
+        state.route_progress = {
+            "completed_work": completed[-ROUTE_COMPLETED_WORK_LIMIT:],
+            "current_milestone": current_milestone,
+            "next_task": next_task,
+            "history": history[-ROUTE_STATE_HISTORY_LIMIT:],
+            "history_count": max(
+                previous_history_count + (0 if history_contains_episode else 1),
+                state.route_used_episodes + 1,
+            ),
+        }
+        if checkpoint_accepted:
+            update_refactor_route(
+                self.workspace,
+                route_id=state.route_id,
+                commit=candidate_commit,
+            )
+            state.route_head_commit = candidate_commit
+            if isinstance(candidate_score, (int, float)) and (
+                state.route_best_score is None
+                or candidate_score > state.route_best_score
+            ):
+                state.route_best_score = float(candidate_score)
+                state.route_best_commit = candidate_commit
+        return {
+            "route_id": state.route_id,
+            "route_base_commit": state.route_base_commit,
+            "route_parent_commit": route_parent_commit,
+            "route_head_commit": state.route_head_commit,
+            "route_best_commit": state.route_best_commit,
+            "checkpoint_accepted": checkpoint_accepted,
+            "candidate_vs_route_parent_pct": (
+                verification.improvement_pct if verification is not None else None
+            ),
+            "candidate_vs_global_best_pct": candidate_vs_global,
+            "route_used_episodes": state.route_used_episodes + 1,
+            "route_remaining_episodes": max(0, state.route_remaining_episodes - 1),
+        }
+
+    def _archive_route_attempt(
+        self,
+        store: CampaignStore,
+        state: SupervisorState,
+        *,
+        episode: int,
+        attempt: dict[str, Any],
+        journal: dict[str, Any] | None = None,
+    ) -> None:
+        route = attempt.get("refactor_route")
+        route_id = route.get("route_id") if isinstance(route, dict) else None
+        route_id = route_id or attempt.get("route_id") or state.route_id
+        if not isinstance(route_id, str) or not route_id:
+            return
+        relative_path = (
+            f"{RUNTIME_DIR}/routes/{route_id}/episodes/e{episode:04d}.json"
+        )
+        attempt["route_id"] = route_id
+        attempt["route_ledger"] = relative_path
+        existing = store.load_route_episode(route_id, episode) or {}
+        existing_attempt = existing.get("attempt")
+        merged_attempt = (
+            {**existing_attempt, **attempt}
+            if isinstance(existing_attempt, dict)
+            else dict(attempt)
+        )
+        outcome = journal.get("outcome") if isinstance(journal, dict) else None
+        if not isinstance(outcome, dict):
+            outcome = {}
+        raw_plan = outcome.get("route_plan")
+        if not isinstance(raw_plan, dict) or not raw_plan:
+            raw_plan = existing.get("route_plan") or state.route_plan
+        raw_progress = outcome.get("route_progress")
+        if not isinstance(raw_progress, dict) or not raw_progress:
+            raw_progress = existing.get("route_progress") or state.route_progress
+        payload = {
+            "schema_version": 1,
+            "route_id": route_id,
+            "episode": episode,
+            "version": attempt.get("version"),
+            "route_state": {
+                "mode": state.mode,
+                "base_commit": state.route_base_commit,
+                "head_commit": state.route_head_commit,
+                "best_commit": state.route_best_commit,
+                "used_episodes": state.route_used_episodes,
+                "remaining_episodes": state.route_remaining_episodes,
+                "exit_reason": state.route_exit_reason or None,
+            },
+            "route_plan": raw_plan,
+            "route_progress": raw_progress,
+            "hot_progress": state.route_progress,
+            "attempt": merged_attempt,
+        }
+        store.archive_route_episode(route_id, episode, payload)
+
     def _is_fast_episode(self, episode: int) -> bool:
         """Use the lightweight path for the first N optimization episodes."""
         return self.fast_episodes > 0 and 1 <= episode <= self.fast_episodes
 
-    def _active_fast_trials(
-        self, active: dict[str, Any], *, fast_mode: bool
-    ) -> int:
+    def _active_fast_trials(self, active: dict[str, Any], *, fast_mode: bool) -> int:
         """Keep an in-flight fast episode's original trial contract across restarts."""
         value = active.get("fast_trials")
         if (
@@ -559,10 +911,13 @@ class LongHorizonCampaign:
         live_memory_path: Path,
         conversion_pending: bool,
         fast_mode: bool,
+        refactor_mode: bool = False,
+        refactor_context: dict[str, Any] | None = None,
         fast_trials: int | None = None,
         resumed: bool = False,
     ) -> str:
         directives = main_adapter.episode_directives(self.base_campaign, version)
+        route = refactor_context or {}
         fast_trial_count = fast_trials or self.fast_trials
         journal_command = (
             f"PYTHONPATH={MODULE_ROOT} python -m long_horizon.journal "
@@ -574,9 +929,13 @@ class LongHorizonCampaign:
             for trial in range(1, fast_trial_count + 1)
         )
         return _render(
-            (FAST_PROMPT_PATH if fast_mode else PROMPT_PATH).read_text(
-                encoding="utf-8"
-            ),
+            (
+                REFACTOR_PROMPT_PATH
+                if refactor_mode
+                else FAST_PROMPT_PATH
+                if fast_mode
+                else PROMPT_PATH
+            ).read_text(encoding="utf-8"),
             {
                 "EPISODE": episode,
                 "VERSION": version,
@@ -615,6 +974,21 @@ class LongHorizonCampaign:
                     "the incumbent latency."
                     if conversion_pending
                     else "No mandatory framework conversion is currently latched."
+                ),
+                "ROUTE_ID": route.get("route_id", ""),
+                "ROUTE_BASE_COMMIT": route.get("route_base_commit", ""),
+                "ROUTE_BEST_COMMIT": route.get("route_best_commit", ""),
+                "ROUTE_USED_EPISODES": route.get("route_used_episodes", 0),
+                "ROUTE_REMAINING_EPISODES": route.get("route_remaining_episodes", 0),
+                "ROUTE_PLAN": json.dumps(
+                    _compact_route_plan({}, route.get("route_plan", {})),
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                "ROUTE_PROGRESS": json.dumps(
+                    _route_prompt_progress(route.get("route_progress", {})),
+                    indent=2,
+                    ensure_ascii=False,
                 ),
             },
         )
@@ -732,6 +1106,7 @@ class LongHorizonCampaign:
         handoff: EpisodeHandoff,
         *,
         fast_mode: bool = False,
+        refactor_mode: bool = False,
         fast_trials: int | None = None,
     ) -> str:
         candidate = (
@@ -747,6 +1122,22 @@ class LongHorizonCampaign:
         )
         if diagnosis:
             return diagnosis
+        if refactor_mode:
+            try:
+                route_journal = load_journal(journal_path)
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                return f"cannot validate refactor route ledger: {exc}"
+            route_outcome = route_journal.get("outcome")
+            if not isinstance(route_outcome, dict):
+                return "refactor route outcome must contain the durable route ledger"
+            if not isinstance(route_outcome.get("route_plan"), dict) or not route_outcome[
+                "route_plan"
+            ]:
+                return "refactor route outcome requires a non-empty route_plan"
+            if not isinstance(route_outcome.get("route_progress"), dict) or not route_outcome[
+                "route_progress"
+            ]:
+                return "refactor route outcome requires non-empty route_progress"
         if fast_mode and handoff.status != "blocked":
             required_fast_trials = fast_trials or self.fast_trials
             try:
@@ -810,6 +1201,7 @@ class LongHorizonCampaign:
         verification: VerificationResult,
         fast_mode: bool = False,
         fast_trials: int | None = None,
+        refactor_route: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         fast_trial_count = fast_trials or self.fast_trials
         representative = _representative_candidate_result(verification)
@@ -939,6 +1331,8 @@ class LongHorizonCampaign:
                 "mode": "fast" if fast_mode else "full",
                 "verification": "single_evaluator" if fast_mode else "abba",
                 "fast_trials": fast_trial_count if fast_mode else None,
+                "campaign_mode": "refactor" if refactor_route else "normal",
+                "refactor_route": refactor_route,
             },
         }
 
@@ -954,6 +1348,7 @@ class LongHorizonCampaign:
         episode_workspace: Path | None = None,
         fast_mode: bool = False,
         fast_trials: int | None = None,
+        refactor_route: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         fast_trial_count = fast_trials or self.fast_trials
         outcome = (
@@ -1148,12 +1543,23 @@ class LongHorizonCampaign:
                 "candidate_commit": candidate_commit or None,
                 "mode": "fast" if fast_mode else "full",
                 "fast_trials": fast_trial_count if fast_mode else None,
+                "campaign_mode": "refactor" if refactor_route else "normal",
+                "refactor_route": refactor_route,
+                "checkpoint_gate": (
+                    "PASS"
+                    if refactor_route and refactor_route.get("checkpoint_accepted")
+                    else "FAIL"
+                    if refactor_route
+                    else None
+                ),
+                "promotion_gate": "FAIL" if refactor_route else None,
             },
         }
 
     def _assess_terminal_handoff(
         self,
         store: CampaignStore,
+        state: SupervisorState,
         active: dict[str, Any],
         worktree: EpisodeWorktree,
         handoff: EpisodeHandoff,
@@ -1162,13 +1568,14 @@ class LongHorizonCampaign:
         fast_mode: bool,
         conversion_pending: bool,
         verifier: GatewayABBAValidator,
-    ) -> tuple[str, list[str], VerificationResult | None, bool]:
+    ) -> CandidateAssessment:
         """Apply the authoritative candidate gates to one terminal handoff."""
         if handoff.status != "candidate_ready":
-            return "", [], None, False
+            return CandidateAssessment()
 
         candidate_commit = handoff.candidate_commit
         violation, paths = worktree.validate_candidate(candidate_commit)
+        refactor_mode = active.get("campaign_mode") == "refactor"
         if (
             not violation
             and conversion_pending
@@ -1185,54 +1592,91 @@ class LongHorizonCampaign:
                 ),
             )
             if policy_violations:
-                violation = (
-                    "production policy rejected candidate: "
-                    + "; ".join(policy_violations)
+                violation = "production policy rejected candidate: " + "; ".join(
+                    policy_violations
                 )
-        verification: VerificationResult | None = None
-        accepted = False
+        assessment = CandidateAssessment(
+            violation=violation,
+            changed_paths=paths,
+        )
         if not violation:
             active["phase"] = (
-                "checking_fast_evaluator" if fast_mode else "verifying"
+                "verifying_refactor_checkpoint"
+                if refactor_mode
+                else "checking_fast_evaluator"
+                if fast_mode
+                else "verifying"
             )
             store.save_active(active)
             if fast_mode:
-                verification = self._fast_verification_result(
+                assessment.verification = self._fast_verification_result(
                     worktree.path,
                     memory_version=memory_version,
                 )
             else:
-                verification = verifier.verify(
+                assessment.verification = verifier.verify(
                     worktree.path,
                     base_commit=worktree.base_commit,
                     candidate_commit=candidate_commit,
                     changed_paths=[
-                        path
-                        for path in paths
-                        if not path.startswith(EVIDENCE_PREFIXES)
+                        path for path in paths if not path.startswith(EVIDENCE_PREFIXES)
                     ],
+                    policy=(
+                        "refactor_checkpoint" if refactor_mode else "strict_promotion"
+                    ),
                 )
             if (
                 conversion_pending
-                and not verification.passed
-                and _conversion_parity_passes(verification)
+                and assessment.verification is not None
+                and not assessment.verification.passed
+                and _conversion_parity_passes(assessment.verification)
             ):
-                verification = VerificationResult(
+                assessment.verification = VerificationResult(
                     "PASS",
-                    verification.candidate_latency_us,
-                    verification.incumbent_latency_us,
-                    verification.improvement_pct,
-                    runs=verification.runs,
-                    artifact=verification.artifact,
+                    assessment.verification.candidate_latency_us,
+                    assessment.verification.incumbent_latency_us,
+                    assessment.verification.improvement_pct,
+                    runs=assessment.verification.runs,
+                    artifact=assessment.verification.artifact,
                     candidate_performance_score=(
-                        verification.candidate_performance_score
+                        assessment.verification.candidate_performance_score
                     ),
                     incumbent_performance_score=(
-                        verification.incumbent_performance_score
+                        assessment.verification.incumbent_performance_score
                     ),
                 )
-            accepted = verification.passed
-        return violation, paths, verification, accepted
+            assessment.checkpoint_accepted = bool(
+                assessment.verification and assessment.verification.passed
+            )
+            if refactor_mode and assessment.checkpoint_accepted:
+                candidate_score = assessment.verification.candidate_performance_score
+                global_score = state.route_global_best_score
+                threshold = 1.0 + self.base_campaign.min_improvement_pct / 100.0
+                could_promote = not (
+                    isinstance(candidate_score, (int, float))
+                    and isinstance(global_score, (int, float))
+                    and global_score > 0.0
+                    and candidate_score <= global_score * threshold
+                )
+                if could_promote:
+                    active["phase"] = "verifying_global_promotion"
+                    store.save_active(active)
+                    assessment.promotion_verification = verifier.verify(
+                        worktree.path,
+                        base_commit=state.route_base_commit,
+                        candidate_commit=candidate_commit,
+                        changed_paths=[
+                            path
+                            for path in paths
+                            if not path.startswith(EVIDENCE_PREFIXES)
+                        ],
+                        policy="strict_promotion",
+                    )
+                    assessment.accepted = assessment.promotion_verification.passed
+            else:
+                assessment.accepted = assessment.checkpoint_accepted
+        assessment.violation = violation
+        return assessment
 
     def _record_terminal_episode(
         self,
@@ -1249,16 +1693,20 @@ class LongHorizonCampaign:
         paths: list[str],
         verification: VerificationResult | None,
         accepted: bool,
+        checkpoint_accepted: bool = False,
+        promotion_verification: VerificationResult | None = None,
         session_id: str = "",
         resume_count: int = 0,
         tokens: int = 0,
         invocations: tuple[Any, ...] = (),
         fast_trials: int | None = None,
         recovered_after_supervisor_interruption: bool = False,
-    ) -> tuple[dict[str, Any] | None, bool]:
+    ) -> tuple[dict[str, Any] | None, bool, str]:
         """Archive and commit one terminal episode exactly once."""
         episode = worktree.episode
         base_commit = worktree.base_commit
+        incumbent_commit = str(active.get("incumbent_commit") or base_commit)
+        refactor_mode = active.get("campaign_mode") == "refactor"
         journal_path = worktree.path / RUNTIME_DIR / "journal.json"
         state.episodes = max(state.episodes, episode)
         state.tokens += max(0, int(tokens))
@@ -1274,10 +1722,56 @@ class LongHorizonCampaign:
         except Exception:
             journal = {}
         outcome = (
-            journal.get("outcome")
-            if isinstance(journal.get("outcome"), dict)
-            else {}
+            journal.get("outcome") if isinstance(journal.get("outcome"), dict) else {}
         )
+        effective_attempt = self._attempt_is_effective(
+            status=status,
+            violation=violation,
+            verification=verification,
+        )
+        active["effective_attempt"] = effective_attempt
+        active["checkpoint_accepted"] = checkpoint_accepted
+        active["accepted"] = accepted
+        refactor_route: dict[str, Any] | None = None
+        if refactor_mode:
+            active["phase"] = "advancing_refactor_route"
+            store.save_active(active)
+            refactor_route = self._update_refactor_ledger(
+                state,
+                episode=episode,
+                route_parent_commit=base_commit,
+                candidate_commit=candidate_commit,
+                checkpoint_accepted=checkpoint_accepted,
+                verification=verification,
+                journal=journal,
+            )
+            refactor_route.update(
+                {
+                    "checkpoint_acceptance_reason": (
+                        "correctness, policy, protocol, and measurement gates passed; "
+                        "performance monotonicity was not required"
+                        if checkpoint_accepted
+                        else violation
+                        or (verification.error if verification is not None else "")
+                        or "checkpoint gate did not pass"
+                    ),
+                    "promotion_accepted": accepted,
+                    "route_plan": state.route_plan,
+                    "route_progress": {
+                        key: value
+                        for key, value in state.route_progress.items()
+                        if key != "history"
+                    },
+                    "exit_reason": (
+                        "surpassed_global_best"
+                        if accepted
+                        else "budget_exhausted"
+                        if state.route_remaining_episodes <= 1
+                        else None
+                    ),
+                }
+            )
+            store.save_state(state)
         attempt = {
             "episode": episode,
             "version": memory_version,
@@ -1285,8 +1779,11 @@ class LongHorizonCampaign:
             "fast_trials": fast_trial_count if fast_mode else None,
             "status": status,
             "accepted": accepted,
+            "checkpoint_accepted": checkpoint_accepted,
+            "effective_attempt": effective_attempt,
             "violation": violation or None,
             "base_commit": base_commit,
+            "incumbent_commit": incumbent_commit,
             "episode_branch": worktree.branch,
             "episode_head": git_head(worktree.path),
             "candidate_commit": candidate_commit or None,
@@ -1294,13 +1791,19 @@ class LongHorizonCampaign:
             "session_id": session_id or None,
             "resume_count": max(0, int(resume_count)),
             "tokens": max(0, int(tokens)),
-            "summary": outcome.get("summary")
-            if isinstance(outcome, dict)
-            else None,
+            "summary": outcome.get("summary") if isinstance(outcome, dict) else None,
             "next_directions": outcome.get("next_directions")
             if isinstance(outcome, dict)
             else None,
             "verification": verification.as_dict() if verification else None,
+            "promotion_verification": (
+                promotion_verification.as_dict()
+                if promotion_verification is not None
+                else None
+            ),
+            "campaign_mode": "refactor" if refactor_mode else "normal",
+            "route_id": state.route_id if refactor_mode else None,
+            "refactor_route": refactor_route,
         }
         if recovered_after_supervisor_interruption:
             attempt["recovered_after_supervisor_interruption"] = True
@@ -1340,7 +1843,8 @@ class LongHorizonCampaign:
         promotion_commit = ""
         outcome_commit = ""
         memory: dict[str, Any] | None = None
-        if accepted and verification is not None:
+        authoritative_verification = promotion_verification or verification
+        if accepted and authoritative_verification is not None:
             active["phase"] = "promoting"
             store.save_active(active)
             evidence = {**attempt, "journal": journal}
@@ -1348,13 +1852,14 @@ class LongHorizonCampaign:
                 version=memory_version,
                 candidate_commit=candidate_commit,
                 journal=journal,
-                verification=verification,
+                verification=authoritative_verification,
                 fast_mode=fast_mode,
                 fast_trials=fast_trial_count,
+                refactor_route=refactor_route,
             )
             promotion_commit = promote_candidate(
                 self.workspace,
-                base_commit=base_commit,
+                base_commit=incumbent_commit,
                 candidate_commit=candidate_commit,
                 episode=episode,
                 evidence=evidence,
@@ -1382,10 +1887,11 @@ class LongHorizonCampaign:
                 episode_workspace=worktree.path,
                 fast_mode=fast_mode,
                 fast_trials=fast_trial_count,
+                refactor_route=refactor_route,
             )
             outcome_commit = record_episode_outcome(
                 self.workspace,
-                base_commit=base_commit,
+                base_commit=incumbent_commit,
                 version=memory_version,
                 episode=episode,
                 status=status,
@@ -1393,9 +1899,7 @@ class LongHorizonCampaign:
             )
             attempt["outcome_commit"] = outcome_commit
             state.consecutive_without_promotion += 1
-            main_adapter.save_stall(
-                self.workspace, state.consecutive_without_promotion
-            )
+            main_adapter.save_stall(self.workspace, state.consecutive_without_promotion)
             if status == "pivot" and not violation:
                 state.pivoted += 1
             elif status == "blocked" and not violation:
@@ -1404,6 +1908,25 @@ class LongHorizonCampaign:
                 state.protocol_failures += 1
             else:
                 state.rejected += 1
+        if effective_attempt:
+            state.effective_episodes += 1
+            if accepted:
+                state.consecutive_effective_stall = 0
+            elif not refactor_mode:
+                state.consecutive_effective_stall += 1
+        route_exit_reason = ""
+        if refactor_mode:
+            route_budget = state.route_used_episodes + state.route_remaining_episodes
+            state.route_used_episodes += 1
+            state.route_remaining_episodes = max(
+                0, route_budget - state.route_used_episodes
+            )
+            if accepted:
+                route_exit_reason = "surpassed_global_best"
+                self._finish_refactor_route(state, reason=route_exit_reason)
+            elif state.route_remaining_episodes == 0:
+                route_exit_reason = "budget_exhausted"
+                self._finish_refactor_route(state, reason=route_exit_reason)
         self._require_canonical_memory(memory_version)
         try:
             sync_live_memory(
@@ -1421,8 +1944,16 @@ class LongHorizonCampaign:
                 f"{type(exc).__name__}",
                 flush=True,
             )
+        if refactor_mode:
+            self._archive_route_attempt(
+                store,
+                state,
+                episode=episode,
+                attempt=attempt,
+                journal=journal,
+            )
         store.archive_attempt(episode, attempt)
-        state.attempts.append(attempt)
+        state.remember_attempt(attempt)
         store.save_state(state)
         worktree.remove(self.workspace)
         store.clear_active()
@@ -1431,12 +1962,14 @@ class LongHorizonCampaign:
         )
         print(
             f"[long-horizon] episode={episode} mode={'fast' if fast_mode else 'full'} "
+            f"campaign_mode={'refactor' if refactor_mode else 'normal'} "
             f"status={status} accepted={accepted} "
+            f"checkpoint_accepted={checkpoint_accepted} "
             f"version=v{memory_version} tokens={max(0, int(tokens))} "
             f"commit={promotion_commit or outcome_commit or '-'}{recovery_label}",
             flush=True,
         )
-        return memory, valid_blocked
+        return memory, valid_blocked, route_exit_reason
 
     @staticmethod
     def _load_recovery_journal(
@@ -1476,6 +2009,7 @@ class LongHorizonCampaign:
             runtime / "journal.json",
             handoff,
             fast_mode=fast_mode,
+            refactor_mode=active.get("campaign_mode") == "refactor",
             fast_trials=fast_trials,
         )
         if diagnosis:
@@ -1494,8 +2028,9 @@ class LongHorizonCampaign:
             state.consecutive_without_promotion,
             self.workspace,
         )
-        violation, paths, verification, accepted = self._assess_terminal_handoff(
+        assessment = self._assess_terminal_handoff(
             store,
+            state,
             active,
             worktree,
             handoff,
@@ -1513,10 +2048,12 @@ class LongHorizonCampaign:
             fast_mode=fast_mode,
             status=handoff.status,
             candidate_commit=handoff.candidate_commit,
-            violation=violation,
-            paths=paths,
-            verification=verification,
-            accepted=accepted,
+            violation=assessment.violation,
+            paths=assessment.changed_paths,
+            verification=assessment.verification,
+            accepted=assessment.accepted,
+            checkpoint_accepted=assessment.checkpoint_accepted,
+            promotion_verification=assessment.promotion_verification,
             fast_trials=fast_trials,
             recovered_after_supervisor_interruption=True,
         )
@@ -1534,6 +2071,7 @@ class LongHorizonCampaign:
             return None
         episode = int(active.get("episode", 0))
         base_commit = str(active.get("base_commit", ""))
+        incumbent_commit = str(active.get("incumbent_commit") or base_commit)
         branch = str(active.get("episode_branch", ""))
         worktree_value = active.get("worktree")
         worktree_path = (
@@ -1544,6 +2082,7 @@ class LongHorizonCampaign:
         phase = str(active.get("phase", ""))
         memory_version = int(active.get("memory_version", 0) or 0)
         fast_mode = active.get("mode") == "fast"
+        refactor_mode = active.get("campaign_mode") == "refactor"
         terminal_status = str(active.get("terminal_status", ""))
         already_recorded = any(
             attempt.get("episode") == episode
@@ -1558,11 +2097,15 @@ class LongHorizonCampaign:
             if line.startswith("worktree ")
         }
         resumable_worktree = bool(
-            git_head(self.workspace) == base_commit
-            and phase in {
+            git_head(self.workspace) == incumbent_commit
+            and phase
+            in {
                 "preparing",
                 "exploring",
                 "verifying",
+                "verifying_refactor_checkpoint",
+                "verifying_global_promotion",
+                "advancing_refactor_route",
                 "promoting",
                 "recording",
             }
@@ -1597,7 +2140,7 @@ class LongHorizonCampaign:
                 # The candidate remains authoritative in the episode worktree. Roll back
                 # only an incomplete supervisor squash before retrying promotion.
                 subprocess.run(
-                    ["git", "reset", "--hard", base_commit],
+                    ["git", "reset", "--hard", incumbent_commit],
                     cwd=str(self.workspace),
                     check=True,
                     stdout=subprocess.DEVNULL,
@@ -1624,7 +2167,7 @@ class LongHorizonCampaign:
                 flush=True,
             )
             return worktree, active
-        if git_head(self.workspace) != base_commit:
+        if git_head(self.workspace) != incumbent_commit:
             message = git_text(self.workspace, "log", "-1", "--format=%s", check=False)
             parent = git_text(self.workspace, "rev-parse", "HEAD^", check=False)
             evidence = git_text(
@@ -1635,7 +2178,7 @@ class LongHorizonCampaign:
             )
             promoted = (
                 phase in {"promoting", "promoted"}
-                and parent == base_commit
+                and parent == incumbent_commit
                 and message
                 == f"episode {episode}: promote verified long-horizon candidate"
                 and bool(evidence)
@@ -1644,7 +2187,7 @@ class LongHorizonCampaign:
                 phase in {"recording", "recorded"}
                 and memory_version > 0
                 and bool(terminal_status)
-                and parent == base_commit
+                and parent == incumbent_commit
                 and message
                 == f"v{memory_version}: long-horizon episode {episode} {terminal_status}"
                 and bool(
@@ -1668,10 +2211,15 @@ class LongHorizonCampaign:
                     "version": memory_version,
                     "status": "candidate_ready" if promoted else terminal_status,
                     "accepted": promoted,
+                    "checkpoint_accepted": active.get("checkpoint_accepted") is True,
                     "violation": None,
                     "base_commit": base_commit,
+                    "incumbent_commit": incumbent_commit,
                     "episode_branch": branch,
                     "mode": "fast" if fast_mode else "full",
+                    "campaign_mode": "refactor" if refactor_mode else "normal",
+                    "route_id": active.get("route_id") if refactor_mode else None,
+                    "effective_attempt": active.get("effective_attempt") is True,
                     "recovered_after_supervisor_interruption": True,
                 }
                 if promoted:
@@ -1688,20 +2236,48 @@ class LongHorizonCampaign:
                         recovered_attempt["blocked_retry_scheduled"] = True
                     elif terminal_status == "interrupted":
                         state.interrupted += 1
-                        recovered_attempt["violation"] = "supervisor process interrupted"
+                        recovered_attempt["violation"] = (
+                            "supervisor process interrupted"
+                        )
                     elif terminal_status == "invalid_handoff":
                         state.protocol_failures += 1
                     else:
                         state.rejected += 1
-                state.attempts.append(recovered_attempt)
+                if active.get("effective_attempt") is True:
+                    state.effective_episodes += 1
+                    if promoted:
+                        state.consecutive_effective_stall = 0
+                    elif not refactor_mode:
+                        state.consecutive_effective_stall += 1
+                if refactor_mode:
+                    route_budget = (
+                        state.route_used_episodes + state.route_remaining_episodes
+                    )
+                    state.route_used_episodes += 1
+                    state.route_remaining_episodes = max(
+                        0, route_budget - state.route_used_episodes
+                    )
+                    if promoted:
+                        self._finish_refactor_route(
+                            state, reason="surpassed_global_best"
+                        )
+                    elif state.route_remaining_episodes == 0:
+                        self._finish_refactor_route(state, reason="budget_exhausted")
+                    self._archive_route_attempt(
+                        store,
+                        state,
+                        episode=episode,
+                        attempt=recovered_attempt,
+                    )
                 store.archive_attempt(episode, recovered_attempt)
+                state.remember_attempt(recovered_attempt)
         else:
             # A crash during squash promotion can leave the incumbent index/worktree dirty
             # while HEAD still points at the immutable base. The active marker proves these
             # are supervisor-owned partial changes, so roll them back before continuing.
             if phase == "promoting" and working_changes(self.workspace):
                 subprocess.run(
-                    ["git", "reset", "--hard", base_commit],
+                    ["git", "reset", "--hard", incumbent_commit],
                     cwd=str(self.workspace),
                     check=True,
                     stdout=subprocess.DEVNULL,
@@ -1728,7 +2304,9 @@ class LongHorizonCampaign:
                     worktree.archive(episode_dir / "interrupted_archive")
                     self._copy_runtime_artifacts(worktree, episode_dir)
             if memory_version <= 0:
-                raise RuntimeError("interrupted episode has no canonical memory version")
+                raise RuntimeError(
+                    "interrupted episode has no canonical memory version"
+                )
             journal = self._load_recovery_journal(store, episode, worktree_path)
             outcome = (
                 journal.get("outcome")
@@ -1751,7 +2329,7 @@ class LongHorizonCampaign:
             )
             outcome_commit = record_episode_outcome(
                 self.workspace,
-                base_commit=base_commit,
+                base_commit=incumbent_commit,
                 version=memory_version,
                 episode=episode,
                 status="interrupted",
@@ -1766,10 +2344,15 @@ class LongHorizonCampaign:
                 "version": memory_version,
                 "status": "interrupted",
                 "accepted": False,
+                "checkpoint_accepted": False,
+                "effective_attempt": False,
                 "violation": "supervisor process interrupted",
                 "base_commit": base_commit,
+                "incumbent_commit": incumbent_commit,
                 "episode_branch": branch,
                 "mode": "fast" if fast_mode else "full",
+                "campaign_mode": "refactor" if refactor_mode else "normal",
+                "route_id": active.get("route_id") if refactor_mode else None,
                 "candidate_commit": candidate_commit or None,
                 "summary": outcome.get("summary"),
                 "next_directions": outcome.get("next_directions"),
@@ -1780,16 +2363,26 @@ class LongHorizonCampaign:
                 state.episodes = max(state.episodes, episode)
                 state.interrupted += 1
                 state.consecutive_without_promotion += 1
-                state.attempts.append(attempt)
-            else:
-                for existing in state.attempts:
-                    if (
-                        existing.get("episode") == episode
-                        and existing.get("episode_branch") == branch
-                    ):
-                        existing.update(attempt)
-                        break
+                if refactor_mode:
+                    route_budget = (
+                        state.route_used_episodes + state.route_remaining_episodes
+                    )
+                    state.route_used_episodes += 1
+                    state.route_remaining_episodes = max(
+                        0, route_budget - state.route_used_episodes
+                    )
+                    if state.route_remaining_episodes == 0:
+                        self._finish_refactor_route(state, reason="budget_exhausted")
+            if refactor_mode:
+                self._archive_route_attempt(
+                    store,
+                    state,
+                    episode=episode,
+                    attempt=attempt,
+                    journal=journal,
+                )
             store.archive_attempt(episode, attempt)
+            state.remember_attempt(attempt)
             try:
                 sync_live_memory(
                     store.live_memory_path,
@@ -1827,8 +2420,14 @@ class LongHorizonCampaign:
             timeout=self.base_campaign.sandbox_timeout,
             private_reference_dir=self.base_campaign.private_reference_dir,
         )
-        recovered_episode = self._recover_interrupted(
-            store, state, verifier=verifier
+        recovery_started_in_refactor = state.mode == "refactor"
+        recovered_episode = self._recover_interrupted(store, state, verifier=verifier)
+        recovered_route_exit_reason = (
+            state.route_exit_reason
+            if recovery_started_in_refactor
+            and recovered_episode is None
+            and state.mode == "normal"
+            else ""
         )
         runner = self.session_runner or LongSessionRunner(
             agent_cli=getattr(self.base_campaign, "agent_cli", "claude")
@@ -1837,10 +2436,33 @@ class LongHorizonCampaign:
         reason = "budget: max-iters" if self.max_version is not None else "max-episodes"
 
         while True:
+            if recovered_route_exit_reason == "budget_exhausted":
+                reason = "refactor: dedicated route budget exhausted"
+                break
             conversion_pending = main_adapter.conversion_required(
                 self.base_campaign, state.consecutive_without_promotion, self.workspace
             )
-            if self.max_version is not None:
+            preempted_for_conversion = False
+            if (
+                recovered_episode is None
+                and state.mode == "refactor"
+                and conversion_pending
+            ):
+                self._finish_refactor_route(
+                    state, reason="preempted_by_framework_conversion"
+                )
+                store.save_state(state)
+                preempted_for_conversion = True
+            if recovered_episode is None and self._refactor_trigger_ready(
+                state, conversion_pending=conversion_pending
+            ):
+                self._start_refactor_route(store, state)
+            refactor_mode = state.mode == "refactor"
+            if (
+                self.max_version is not None
+                and not refactor_mode
+                and not preempted_for_conversion
+            ):
                 if main_adapter.latest_version(self.workspace) >= self.max_version:
                     if conversion_pending:
                         raise RuntimeError(
@@ -1850,6 +2472,8 @@ class LongHorizonCampaign:
                     break
             elif (
                 self.max_version is None
+                and not refactor_mode
+                and not preempted_for_conversion
                 and state.episodes >= self.max_episodes
             ):
                 reason = "max-episodes"
@@ -1860,10 +2484,7 @@ class LongHorizonCampaign:
             ):
                 reason = "episode-limit"
                 break
-            if (
-                self.token_budget
-                and state.tokens >= self.token_budget
-            ):
+            if self.token_budget and state.tokens >= self.token_budget:
                 if conversion_pending:
                     raise RuntimeError(
                         "mandatory Triton->Gluon conversion did not succeed before token-budget"
@@ -1883,9 +2504,11 @@ class LongHorizonCampaign:
                     if mode in {"fast", "full"}
                     else self._is_fast_episode(episode)
                 )
+                refactor_mode = active.get("campaign_mode") == "refactor"
             else:
                 episode = state.episodes + 1
-                fast_mode = self._is_fast_episode(episode)
+                refactor_mode = state.mode == "refactor"
+                fast_mode = False if refactor_mode else self._is_fast_episode(episode)
 
             episode_mode = "fast" if fast_mode else "full"
             self.base_campaign.ensure_plan_reviewer_availability(
@@ -1895,15 +2518,20 @@ class LongHorizonCampaign:
             if resumed:
                 active.setdefault("mode", "fast" if fast_mode else "full")
                 active.setdefault(
+                    "campaign_mode", "refactor" if refactor_mode else "normal"
+                )
+                active.setdefault("incumbent_commit", git_head(self.workspace))
+                active.setdefault(
                     "fast_trials", self.fast_trials if fast_mode else None
                 )
                 if active.get("resumed_from_phase") == "preparing":
-                    main_adapter.link_episode_runtime(
-                        self.base_campaign, worktree.path
-                    )
+                    main_adapter.link_episode_runtime(self.base_campaign, worktree.path)
             else:
                 memory_version = main_adapter.latest_version(self.workspace) + 1
-                base_commit = git_head(self.workspace)
+                incumbent_commit = git_head(self.workspace)
+                base_commit = (
+                    state.route_head_commit if refactor_mode else incumbent_commit
+                )
                 worktree = EpisodeWorktree.plan(
                     self.workspace, episode, base_commit, root=self.worktree_root
                 )
@@ -1911,9 +2539,12 @@ class LongHorizonCampaign:
                     "episode": episode,
                     "memory_version": memory_version,
                     "base_commit": base_commit,
+                    "incumbent_commit": incumbent_commit,
                     "episode_branch": worktree.branch,
                     "worktree": str(worktree.path),
                     "mode": "fast" if fast_mode else "full",
+                    "campaign_mode": "refactor" if refactor_mode else "normal",
+                    "route_id": state.route_id if refactor_mode else None,
                     "fast_trials": self.fast_trials if fast_mode else None,
                     "phase": "preparing",
                 }
@@ -1934,9 +2565,7 @@ class LongHorizonCampaign:
                         "runtime linking dirtied the episode boundary: "
                         + ", ".join(unexpected)
                     )
-            fast_trial_count = self._active_fast_trials(
-                active, fast_mode=fast_mode
-            )
+            fast_trial_count = self._active_fast_trials(active, fast_mode=fast_mode)
             runtime = worktree.path / RUNTIME_DIR
             journal_path = runtime / "journal.json"
             handoff_path = runtime / "handoff.json"
@@ -1958,6 +2587,20 @@ class LongHorizonCampaign:
                 live_memory_path=store.live_memory_path,
                 conversion_pending=conversion_pending,
                 fast_mode=fast_mode,
+                refactor_mode=refactor_mode,
+                refactor_context=(
+                    {
+                        "route_id": state.route_id,
+                        "route_base_commit": state.route_base_commit,
+                        "route_best_commit": state.route_best_commit,
+                        "route_used_episodes": state.route_used_episodes,
+                        "route_remaining_episodes": state.route_remaining_episodes,
+                        "route_plan": state.route_plan,
+                        "route_progress": state.route_progress,
+                    }
+                    if refactor_mode
+                    else None
+                ),
                 fast_trials=fast_trial_count,
                 resumed=resumed,
             )
@@ -1978,8 +2621,7 @@ class LongHorizonCampaign:
             policy_future: Future[None] | None = None
             if (
                 fast_mode
-                and getattr(self.base_campaign, "optimization_mode", "")
-                == "production"
+                and getattr(self.base_campaign, "optimization_mode", "") == "production"
             ):
                 policy_stop = Event()
                 policy_executor = ThreadPoolExecutor(
@@ -2006,6 +2648,7 @@ class LongHorizonCampaign:
                         journal_path,
                         handoff,
                         fast_mode=fast_mode,
+                        refactor_mode=refactor_mode,
                         fast_trials=fast_trial_count,
                     ),
                     reasoning_effort=self._episode_reasoning_effort(
@@ -2033,9 +2676,7 @@ class LongHorizonCampaign:
             status = handoff.status if handoff else "invalid_handoff"
             violation = ""
             candidate_commit = handoff.candidate_commit if handoff else ""
-            paths: list[str] = []
-            verification: VerificationResult | None = None
-            accepted = False
+            assessment = CandidateAssessment()
             if result.exit_status != 0 or result.timed_out:
                 violation = f"session failed: exit={result.exit_status} timeout={result.timed_out}"
             elif handoff is None:
@@ -2044,20 +2685,21 @@ class LongHorizonCampaign:
                     or "session produced no valid terminal handoff"
                 )
             elif status == "candidate_ready":
-                violation, paths, verification, accepted = (
-                    self._assess_terminal_handoff(
-                        store,
-                        active,
-                        worktree,
-                        handoff,
-                        memory_version=memory_version,
-                        fast_mode=fast_mode,
-                        conversion_pending=conversion_pending,
-                        verifier=verifier,
-                    )
+                assessment = self._assess_terminal_handoff(
+                    store,
+                    state,
+                    active,
+                    worktree,
+                    handoff,
+                    memory_version=memory_version,
+                    fast_mode=fast_mode,
+                    conversion_pending=conversion_pending,
+                    verifier=verifier,
                 )
 
-            memory, valid_blocked = self._record_terminal_episode(
+            if assessment.violation:
+                violation = assessment.violation
+            memory, valid_blocked, route_exit_reason = self._record_terminal_episode(
                 store,
                 state,
                 active,
@@ -2067,14 +2709,17 @@ class LongHorizonCampaign:
                 status=status,
                 candidate_commit=candidate_commit,
                 violation=violation,
-                paths=paths,
-                verification=verification,
-                accepted=accepted,
+                paths=assessment.changed_paths,
+                verification=assessment.verification,
+                accepted=assessment.accepted,
+                checkpoint_accepted=assessment.checkpoint_accepted,
+                promotion_verification=assessment.promotion_verification,
                 session_id=result.session_id,
                 resume_count=result.resume_count,
                 tokens=result.tokens,
                 invocations=result.invocations,
             )
+            accepted = assessment.accepted
             if accepted and memory is not None:
                 target_util = float(getattr(self.base_campaign, "target_util", 0.0))
                 if target_util > 0.0 and main_adapter.peak_util(memory) >= target_util:
@@ -2083,6 +2728,9 @@ class LongHorizonCampaign:
                         f">= {target_util:.0f}%"
                     )
                     break
+            if route_exit_reason == "budget_exhausted":
+                reason = "refactor: dedicated route budget exhausted"
+                break
             if valid_blocked:
                 print(
                     f"[long-horizon] blocked at episode={episode}; starting a fresh "
@@ -2098,6 +2746,11 @@ class LongHorizonCampaign:
                     state.consecutive_without_promotion,
                     self.workspace,
                 )
+                and state.mode != "refactor"
+                and not self._refactor_trigger_ready(
+                    state,
+                    conversion_pending=False,
+                )
             ):
                 reason = f"stall: {state.consecutive_without_promotion} episodes without promotion"
                 break
@@ -2105,7 +2758,10 @@ class LongHorizonCampaign:
         print(
             f"[long-horizon] STOP {reason}; episodes={state.episodes} accepted={state.accepted} "
             f"rejected={state.rejected} pivoted={state.pivoted} blocked={state.blocked} "
-            f"protocol_failures={state.protocol_failures} tokens={state.tokens}",
+            f"protocol_failures={state.protocol_failures} tokens={state.tokens} "
+            f"effective_episodes={state.effective_episodes} "
+            f"effective_stall={state.consecutive_effective_stall} mode={state.mode} "
+            f"route_id={state.route_id or '-'} route_remaining={state.route_remaining_episodes}",
             flush=True,
         )
         return reason

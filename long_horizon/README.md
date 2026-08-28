@@ -12,13 +12,25 @@ incumbent and candidate in an exact same-allocation ABBA schedule. A strict corr
 improvement is squash-promoted to the incumbent; every other outcome records canonical
 `memory/vN.json` evidence without changing the incumbent kernel.
 
+After the configured effective-episode and effective-stall thresholds, the supervisor can enter a
+dedicated refactor route. That route keeps the stable global best on the incumbent branch while a
+persistent `refs/atrex/refactor/<route-id>` head advances through correctness-passing, potentially
+non-monotonic checkpoints. Candidate-versus-route-parent ABBA uses the `refactor_checkpoint` policy;
+a candidate that can beat the frozen global best receives a second strict ABBA before promotion.
+Route plan, progress, head, best checkpoint, measurements, remaining budget, and exit reason survive
+restart. `state.json` is bounded to recent hot state; complete route attempts live under
+`.atrex_long_horizon/routes/<route-id>/episodes/`, so neither restart-state size nor prompt context
+grows linearly with a route.
+
 An episode candidate commit contains only `kernel.py`. Plans, profiles, planner discussions,
 journals, and handoffs stay uncommitted and are copied into the episode archive before the isolated
 worktree is removed.
 
 Runtime state lives under `.atrex_long_horizon/` in generated campaign workspaces. Public options
 such as `--handoff-resumes`, `--verify-repeats`, `--verify-run-timeout`, and
-`--min-improvement-pct` are parsed directly by `orchestrator/optimize.py`.
+`--min-improvement-pct` are parsed directly by `orchestrator/optimize.py`. Refactor-route entry and
+budget use `--refactor-after-episodes`, `--refactor-stall-threshold`, and
+`--refactor-max-episodes`.
 
 Each active episode also exposes ignored `memory/live.json`. It is initialized immediately and
 atomically refreshed after every journal append, but it never participates in version selection or

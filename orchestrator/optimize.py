@@ -13,9 +13,9 @@ same-allocation ABBA schedule in full mode.
 
 Termination policy
 ------------------
-- Outer loop (this file):  HARD budget break = max versions/episodes OR token budget,
-  plus a mechanical target short-circuit (peak utilization >= --target-util on a
-  committed, correctness-PASS version). No convergence judge.
+- Outer loop (this file): normal mode stops at max versions/episodes or token budget. An eligible
+  stalled campaign may spend its separately bounded refactor-route episodes beyond max versions;
+  token budget and the mechanical target short-circuit remain hard limits. No convergence judge.
 - Inner loop (one episode): a persistent engineering direction with structured journal and
   bounded handoff recovery, isolated from the incumbent branch.
 
@@ -82,6 +82,9 @@ try:
         DEFAULT_FAST_EPISODES,
         DEFAULT_FAST_TRIALS,
         DEFAULT_HANDOFF_RESUMES,
+        DEFAULT_REFACTOR_AFTER_EPISODES,
+        DEFAULT_REFACTOR_MAX_EPISODES,
+        DEFAULT_REFACTOR_STALL_THRESHOLD,
         DEFAULT_SANDBOX_TIMEOUT,
         DEFAULT_VERIFY_REPEATS,
         DEFAULT_VERIFY_RUN_TIMEOUT,
@@ -119,6 +122,9 @@ except ImportError:  # direct script execution: python orchestrator/optimize.py
         DEFAULT_FAST_EPISODES,
         DEFAULT_FAST_TRIALS,
         DEFAULT_HANDOFF_RESUMES,
+        DEFAULT_REFACTOR_AFTER_EPISODES,
+        DEFAULT_REFACTOR_MAX_EPISODES,
+        DEFAULT_REFACTOR_STALL_THRESHOLD,
         DEFAULT_SANDBOX_TIMEOUT,
         DEFAULT_VERIFY_REPEATS,
         DEFAULT_VERIFY_RUN_TIMEOUT,
@@ -487,7 +493,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--max-iters",
         type=int,
         default=20,
-        help="Hard cap on canonical optimization versions/episodes.",
+        help="Normal-mode cap on canonical versions/episodes; an active refactor route uses "
+        "its separate bounded budget.",
     )
     ap.add_argument(
         "--fast-episodes",
@@ -511,7 +518,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--token-budget",
         type=int,
         default=0,
-        help="Hard token cap across all episode turns (0 = no cap; max-iters still bounds it).",
+        help="Hard token cap across all episode turns (0 = no cap).",
     )
     ap.add_argument(
         "--target-util",
@@ -571,6 +578,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Optional: stop after N consecutive unpromoted episodes (0 = disabled).",
     )
     ap.add_argument(
+        "--refactor-after-episodes",
+        type=int,
+        default=DEFAULT_REFACTOR_AFTER_EPISODES,
+        help="Enter refactor-route mode only after this many effective episodes "
+        "(default: 100; 0 disables).",
+    )
+    ap.add_argument(
+        "--refactor-stall-threshold",
+        type=int,
+        default=DEFAULT_REFACTOR_STALL_THRESHOLD,
+        help="Effective unpromoted episodes required to enter refactor-route mode "
+        "(default: 10; 0 disables).",
+    )
+    ap.add_argument(
+        "--refactor-max-episodes",
+        type=int,
+        default=DEFAULT_REFACTOR_MAX_EPISODES,
+        help="Dedicated episode budget for one refactor route "
+        "(default: 100; 0 disables).",
+    )
+    ap.add_argument(
         "--convert-after",
         type=int,
         default=DEFAULT_CONVERT_AFTER,
@@ -608,6 +636,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
     if args.convert_after < 0:
         ap.error("--convert-after must be non-negative")
+    if args.refactor_after_episodes < 0:
+        ap.error("--refactor-after-episodes must be non-negative")
+    if args.refactor_stall_threshold < 0:
+        ap.error("--refactor-stall-threshold must be non-negative")
+    if args.refactor_max_episodes < 0:
+        ap.error("--refactor-max-episodes must be non-negative")
     if args.fast_episodes < 0:
         ap.error("--fast-episodes must be non-negative")
     if args.fast_trials <= 0:
@@ -654,8 +688,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.agent_cli == "qodercli" and args.token_budget > 0:
         print(
             "[orchestrator] WARNING: qodercli token-budget enforcement depends on token usage "
-            "reported in stream-json; some Qoder models report zero, so --max-iters remains "
-            "the authoritative hard bound in that configuration.",
+            "reported in stream-json; some Qoder models report zero, so --max-iters and the "
+            "refactor-route budget remain the authoritative episode bounds.",
             file=sys.stderr,
             flush=True,
         )
@@ -743,6 +777,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         target_util=args.target_util,
         setup_timeout=args.setup_timeout,
         max_stall=args.max_stall,
+        refactor_after_episodes=args.refactor_after_episodes,
+        refactor_stall_threshold=args.refactor_stall_threshold,
+        refactor_max_episodes=args.refactor_max_episodes,
         framework_baseline=args.framework_baseline,
         framework_baseline_timeout=args.framework_baseline_timeout,
         handoff_resumes=args.handoff_resumes,
