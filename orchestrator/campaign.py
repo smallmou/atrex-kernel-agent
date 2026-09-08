@@ -597,6 +597,7 @@ class Campaign:
         errors: list[str]
         review_payload: object | None = None
         review_summary = ""
+        valid_verdict = False
         with tempfile.TemporaryDirectory(
             prefix="atrex-production-review-"
         ) as directory:
@@ -674,6 +675,7 @@ class Campaign:
                             f"{type(exc).__name__}: {exc}"
                         ]
                     else:
+                        valid_verdict = True
                         status = "accepted" if not errors else "rejected"
                         print(
                             f"[production-policy] independent full-candidate review {status}: "
@@ -686,12 +688,14 @@ class Campaign:
                 workspace, framework, require_gluon
             )
         except OSError as exc:
+            valid_verdict = False
             errors = [
                 "production candidate changed during policy review: "
                 f"{type(exc).__name__}: {exc}"
             ]
         else:
             if reviewed_digest != candidate_digest:
+                valid_verdict = False
                 errors = ["production candidate changed during policy review"]
         review_record = {
             "schema_version": DEPENDENCY_REVIEW_SCHEMA_VERSION,
@@ -710,7 +714,11 @@ class Campaign:
             candidate_digest,
             review_record,
         )
-        self._production_review_cache[cache_key] = (tuple(errors), review_record)
+        # An absent/invalid verdict or failed session must be retried on the next
+        # request, even for identical candidate bytes. Valid policy rejections
+        # remain cacheable; infrastructure failures are still persisted above.
+        if valid_verdict:
+            self._production_review_cache[cache_key] = (tuple(errors), review_record)
         return list(dict.fromkeys([*errors, *persistence_errors]))
 
     def _production_kernel_violations(
