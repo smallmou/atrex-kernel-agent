@@ -19,7 +19,11 @@ agent in this repository to translate the task into that command and start the c
 - AMD workers: `rocprofv3`, wrapped by `tools/profile_kernel.sh`
 
 The orchestrator verifies required submodules before starting and initializes missing ones
-automatically; the large `reference-projects/` collection remains optional. On PPU hardware the
+automatically; the large `reference-projects/` collection remains optional. Two submodules are
+required for every campaign: `3rdparty/ncu-report-skill` and `3rdparty/atrex-bench`, the vendored
+evaluator the default `precision-validation` plugin uses as its comparator. `3rdparty/atrex-bench`
+clones over SSH (`git@github.com:smallmou/atrex-bench.git`), so initialize it with an SSH key that can
+reach that remote — the same requirement the t-head projects below have. On PPU hardware the
 t-head projects in that collection are the only PPU-specific implementation references available, and
 they clone over SSH (`git@github.com:t-head/...`), so initialize them with an SSH key that can reach
 that org. `reference-projects/README.md` indexes every project by vendor, DSL, and operator.
@@ -50,6 +54,22 @@ cd atrex-kernel-agent
 - Native Atrex-Bench: `reference.py`, `input.py`, and detailed `shapes.json`, inside a checkout
   containing `scripts/run_eval.py` and `src/atrex_bench`. An optional `agent_problem.json` may provide
   the generalized public contract using schema `atrex.agent_problem.v1`.
+
+For a production native campaign that operator directory must live **outside** this repository, and
+its exact cases must not be vendored here either. Every workspace symlinks `tools/`, `reference/`,
+`skills/` and `reference-projects/` at the repository root, so anything inside the checkout is
+reachable by traversing out of one of them. The supervisor therefore refuses two configurations
+rather than running with the hidden cases exposed:
+
+- an `--op-dir` resolving inside the repository; and
+- an external operator whose `shapes.json` is byte-identical to one under
+  `3rdparty/atrex-bench/data/`, since moving the directory achieves nothing while its twin is still
+  vendored.
+
+`3rdparty/atrex-bench` supplies the evaluator runtime, not a private operator corpus. Only `src/` and
+`scripts/` are needed for evaluation, so a sparse checkout excluding `data/` is enough — and is the
+simplest way to run generalized production against an operator the corpus also ships. Leaderboard
+mode is unaffected, because it does not withhold shapes in the first place.
 
 Production native campaigns never expose detailed shapes to baseline or optimization sessions. If
 `agent_problem.json` is supplied, AKA validates and copies it directly. Otherwise a separate clean AKA

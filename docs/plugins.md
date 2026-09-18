@@ -1,9 +1,22 @@
 # AKA local plugins
 
 AKA discovers plugins automatically from immediate subdirectories of `plugins/` that contain a
-`plugin.json`. GPU Wiki ships as `plugins/gpu-wiki` and is therefore available to every campaign
-without another command-line option. A plugin may contribute tools, Skills, instructions, and
+`plugin.json`. Two ship by default and are therefore available to every campaign without another
+command-line option: `plugins/gpu-wiki` (scoped optimization experience and hardware facts) and
+`plugins/precision-validation` (the production precision policy, backed by the vendored
+`3rdparty/atrex-bench` evaluator). A plugin may contribute tools, Skills, instructions, and
 workspace resources.
+
+Not every tool is meant for the agent. `precision-validation` is driven by the supervisor, because it
+is an acceptance gate on the agent's own output; its instructions therefore describe what the gate
+checks rather than how to invoke it. `PluginRegistry.call` is a plain public method, so any
+supervisor-side component may use a plugin as a policy seam.
+
+There is no private-tool concept: `instructions()` advertises every tool of every discovered plugin,
+so a supervisor-owned tool is still listed for the agent. That is only safe for a tool that is a pure
+function of its arguments, as these three are — the supervisor acts solely on results it obtained by
+calling them with its own trusted inputs. A supervisor-side policy tool that mutated state, or whose
+result the supervisor would read from anywhere the agent can write, would need a different design.
 
 ## Two plugin roots
 
@@ -214,6 +227,12 @@ Initialization writes `.atrex_plugins/lock.json` with the discovered plugin dire
 commands, versions, and SHA-256 fingerprints of plugin code, schemas, instructions, resources, and
 Skills. Git metadata and Python caches are excluded. Resume and tool invocation fail if this snapshot
 no longer matches. Restore the original plugin contents or start a new campaign.
+
+Adding `plugins/precision-validation` changed that snapshot, so workspaces created before it cannot
+resume: `check_lock` reports `plugin_changed`, and in production mode the precision gate fails closed
+rather than promoting without it. Finish those campaigns on the revision that created them, or start a
+fresh workspace. Bumping the `3rdparty/atrex-bench` submodule has the same effect, because the
+plugin's declared resources are fingerprinted.
 
 Existing campaigns created before this plugin mechanism should continue with the revision that
 created them. To roll back a new campaign, stop it, check out the previous AKA revision, and create a

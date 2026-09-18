@@ -53,6 +53,7 @@ promotion; it is not a second CLI.
 │   ├── agent_runtime/                 # Claude/Qoder/Codex/Pi adapters and process policy
 │   ├── telemetry/                     # Phase timing and token telemetry
 │   ├── optimization_policy.py         # leaderboard/production policy gates
+│   ├── precision_gate.py              # GPU allocation, sessions and evidence digest for the precision gate
 │   └── prompts/                       # Setup, inspection, baseline, and episode prompts
 ├── long_horizon/                      # Episode worktrees, handoff protocol, ABBA verification
 ├── agents/                            # Baseline Agent definition injected into campaign workspaces
@@ -64,8 +65,12 @@ promotion; it is not a second CLI.
 ├── reference/                         # Workspace init, evaluator adapters, schema, SOL packaging
 ├── gpu-wiki/                          # Structured hardware/kernel retrieval and trace mining
 ├── plugins/                           # Automatically discovered local plugin manifests and adapters
+│   ├── gpu-wiki/                      # Scoped GPU optimization experience and hardware facts
+│   └── precision-validation/          # Precision policy: suite, schedule, GPU driver, evidence checks
 ├── reference-projects/                # Optional source-search repositories
-└── 3rdparty/                          # Profiler-analysis dependencies
+└── 3rdparty/                          # Profiler-analysis dependencies and the vendored evaluator
+    ├── ncu-report-skill/              # NCU report analysis skill
+    └── atrex-bench/                   # Official Atrex-Bench evaluator and comparator
 ```
 
 The `skills/` and `agents/` directories are internal runtime assets. The orchestrator links or
@@ -363,6 +368,34 @@ third-party libraries. `optimization_mode=production` is fail-closed:
 - a missing, malformed, incomplete, or evidence-mutating Agent verdict fails closed;
 - violating episode candidates are rejected before promotion and recorded as failed memory.
 
+#### Precision gate
+
+Production promotion runs a second, independent gate after the framework/dependency review passes.
+Its policy is a plugin, not main-line code: `plugins/precision-validation/` owns the numerical suite
+schema, the probe schedule, the input constructors, the GPU-side driver, and the checks that decide
+whether returned evidence and an independent review discharge the plan. It exposes three pure tools —
+`plan`, `check-evaluation`, `check-review` — and the supervisor drives them itself, because this is an
+acceptance gate on the agent's own output. The plugin contract has no private-tool concept, so those
+three ids are still advertised to the agent like any other; that is harmless because all three are
+pure functions of their arguments and the supervisor only ever acts on results it obtained by calling
+them with its own trusted inputs. An agent calling them learns nothing it could not read in the
+repository and cannot influence the verdict. Before each gate run the supervisor re-fingerprints the
+plugin tree and re-checks it against the workspace lock, so editing the policy on disk mid-campaign
+blocks promotion instead of relaxing it.
+
+`orchestrator/precision_gate.py` keeps only what a plugin tool cannot: the GPU allocation and its
+queue wait (a tool's timeout caps at 3600 seconds, below a gateway admission wait), the isolated
+suite-author and reviewer sessions, and the evidence digest that binds a pass to the exact candidate,
+trusted contract, driver and prompt bytes. A non-empty violation list blocks promotion; any blocked
+or malformed gate result also blocks it, so a broken gate can never read as a pass.
+
+The comparison itself belongs to Atrex-Bench, vendored as `3rdparty/atrex-bench`. The gate
+regenerates every operator input from declared construction families and then asks Atrex-Bench
+whether the candidate still matches the reference under the operator's own tolerances — additional
+seeds of the ordinary generator are explicitly not evidence. Probes run under Atrex-Bench's
+`untrusted` guard profile, downgraded to `trusted` for `Cuda` campaigns, which compile through the
+runtime extension loading that profile blocks.
+
 Independently of optimization mode, Triton campaigns enter a mandatory Triton-to-Gluon episode after
 the configured stall threshold. The episode receives an explicit conversion directive and
 TTGIR/conversion-sheet workflow. Conversion remains latched until a committed Gluon candidate passes
@@ -526,7 +559,11 @@ from main-workspace commits; their recoverable local state remains on disk.
   PPU is the scoped exception: follow `ppu-acu-joint-profile` and collect new PPU profiler evidence
   only when its per-iteration decision rule says the unresolved fact can change the next edit.
 - Ground-truth evaluator inputs are immutable.
-- Correctness must pass before performance conclusions or promotion.
+- Correctness must pass before performance conclusions or promotion. In production mode a candidate
+  must additionally clear the independent precision gate, which regenerates inputs from declared
+  construction families rather than reseeding the operator's own generator.
+- Generalized production operator directories must live outside this repository, so a workspace
+  cannot reach their exact shapes through its repository symlinks.
 - Every accepted candidate must be represented by Git and structured memory.
 - `masked: true` memory is excluded from active planning.
 - Production candidates must be self-contained in their selected framework.

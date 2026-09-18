@@ -85,7 +85,14 @@ def _render(template_path: Path, **kw: str) -> str:
 def ensure_submodules(platform: str = "", arch: str = "") -> None:
     """Initialize submodules required by the optimization pipeline.
 
-    Covers 3rdparty/ncu-report-skill. Optional plugin skills are installed when available.
+    Covers 3rdparty/ncu-report-skill and 3rdparty/atrex-bench. Optional plugin skills
+    are installed when available. The vendored evaluator is initialized for every
+    campaign, not only native ones: the precision-validation plugin declares it as an
+    *optional* resource so a shallow clone still discovers every plugin, which means an
+    uninitialized working tree would otherwise surface late, as a blocked production
+    precision gate, instead of here. It clones over SSH
+    (``git@github.com:smallmou/atrex-bench.git``), so it needs a key that can reach that
+    remote.
     PPU campaigns also require their vendor reference projects: without those
     working trees the framework-baseline catalog silently contains no usable
     PPU implementation sources.
@@ -95,6 +102,10 @@ def ensure_submodules(platform: str = "", arch: str = "") -> None:
         (
             "3rdparty/ncu-report-skill",
             REPO_ROOT / "3rdparty" / "ncu-report-skill" / "SKILL.md",
+        ),
+        (
+            "3rdparty/atrex-bench",
+            REPO_ROOT / "3rdparty" / "atrex-bench" / "scripts" / "run_eval.py",
         ),
     ]
     if hardware_vendor(platform, arch) == "ppu":

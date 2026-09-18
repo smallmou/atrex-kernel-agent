@@ -350,6 +350,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-timeout-s", type=float, default=20.0)
     parser.add_argument("--perf-timeout-s", type=float, default=120.0)
     parser.add_argument("--shape-id", action="append", dest="shape_ids")
+    parser.add_argument(
+        "--trust-mode",
+        choices=("trusted", "untrusted"),
+        default=None,
+        help=(
+            "Forward an explicit Atrex-Bench guard profile. untrusted disables runtime "
+            "C++/CUDA extension loading and installs anti-tampering guards, so it suits "
+            "correctness gating of DSL candidates but not frameworks that JIT-build "
+            "native extensions. Omitted leaves the evaluator's own default."
+        ),
+    )
     return parser
 
 
@@ -419,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if correctness_only:
             command.append("--correctness-only")
+        if args.trust_mode:
+            command.extend(["--trust-mode", args.trust_mode])
         completed = subprocess.run(
             command,
             cwd=str(runtime_root),

@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Supervisor-owned distribution probes inside the existing GPU evaluator allocation.
+"""Supervisor-owned distribution probes driving the vendored Atrex-Bench evaluator.
 
-The original generator supplies only tensor metadata. Every input must be explicitly
-regenerated or justified as invariant by an operator-owned numerical_suite.json.
-Correctness, tolerances and input-mutation checks remain owned by the evaluator.
+The operator's generator supplies only tensor metadata. Every input must be explicitly
+regenerated or justified as invariant by an operator-owned numerical_suite.json. The
+precision comparison itself -- tolerances, relative-L2, output-tree structure and
+input-mutation checks -- is owned by Atrex-Bench (``3rdparty/atrex-bench``), reached
+through the workspace harness ``test_kernel.py``.
+
+This file is deliberately self-contained: the supervisor copies it alone into a GPU
+allocation as ``test_kernel.py``, and the probe tail appended to ``input.py`` re-enters
+it with :func:`runpy.run_path`. It must therefore import nothing from the plugin or
+from AKA. Its pure planning helpers carry no torch import at module scope so the
+plugin adapter can call them on a supervisor host with no GPU.
 """
 from __future__ import annotations
 
@@ -17,6 +25,7 @@ import sys
 
 PREFIX = "__ATREX_NUMERICAL_RESULT__="
 GENERATORS = {"uniform", "log_uniform", "sparse", "alternating", "constant", "ramp", "packed_bytes", "near_constant"}
+TRUST_MODES = {"trusted", "untrusted"}
 
 
 def validate_suite(suite):
@@ -88,6 +97,35 @@ def validation_schedule(suite, shapes, rotation="", mode="light"):
         schedule.append({"case_id": case["id"], "shape_ids": selected, "seeds": seeds,
                          "selection_digest": hashlib.sha256(identity.encode()).hexdigest()})
     return schedule
+
+
+def expected_probes(plan, suite, shapes):
+    """Distinct input signatures the schedule must exercise, across every rank."""
+    signatures = {json.dumps(shapes[sid].get("input_kwargs") or {}, sort_keys=True)
+                  for sid in plan["shape_ids"]}
+    return len(signatures) * len(plan["seeds"]) * suite["world_size"]
+
+
+def resolve_trust_mode(requested, framework_key):
+    """Harden the evaluator except where the framework needs runtime extension JIT.
+
+    ``untrusted`` disables ``torch.utils.cpp_extension`` loading and installs
+    anti-tampering guards. A CUDA candidate normally compiles through exactly that path,
+    so it keeps the ``trusted`` profile rather than failing to build.
+
+    ``framework_key`` must already be AKA's normalized framework token, not the raw
+    ``--framework`` string: the supervisor decides framework identity (``Cuda``,
+    ``CUDA C``, ``cuda-c`` all normalize to ``cuda``) and the same token drives the
+    matching promise in the workspace policy directive. Normalizing again here would
+    create a second, divergent notion of what counts as CUDA.
+    """
+    if requested not in TRUST_MODES:
+        raise ValueError("trust mode must be trusted or untrusted")
+    if framework_key != str(framework_key).strip().lower():
+        raise ValueError("framework_key must be a normalized lowercase token")
+    if requested == "untrusted" and framework_key == "cuda":
+        return "trusted"
+    return requested
 
 
 def numerical_inputs(inputs, case, seed, rank):
@@ -211,6 +249,10 @@ def run(request_path):
                        "--multi-seed", str(len(plan["seeds"]) - 1)]
             for shape_id in plan["shape_ids"]:
                 command += ["--shape-id", shape_id]
+            # An operator-supplied evaluator owns its own guard profile; only the AKA
+            # harness is known to forward --trust-mode to the Atrex-Bench runner.
+            if request.get("trust_mode") and not suite.get("evaluator_command"):
+                command += ["--trust-mode", request["trust_mode"]]
             process = subprocess.run(command, cwd=root, capture_output=True, text=True,
                                      timeout=request["per_case_timeout"])
             result = None

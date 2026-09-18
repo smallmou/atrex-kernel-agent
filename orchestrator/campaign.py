@@ -506,10 +506,53 @@ class Campaign:
         return ""
 
     def _assert_generalized_inputs_are_private(self) -> None:
-        """Fail closed if exact evaluator artifacts appear in the agent workspace."""
+        """Fail closed if exact evaluator artifacts appear in or are reachable from the workspace."""
         private_dir = self.private_reference_dir
         if private_dir is None:
             return
+        # The workspace symlinks tools/, reference/, skills/ and reference-projects/ at
+        # REPO_ROOT, so anything inside the repository -- including the vendored
+        # 3rdparty/atrex-bench/data tree -- is reachable by traversing out of one of
+        # them. An in-repo private reference dir would therefore hand the agent the
+        # exact shapes this mode exists to withhold.
+        resolved = private_dir.resolve()
+        if resolved == REPO_ROOT or REPO_ROOT in resolved.parents:
+            raise RuntimeError(
+                "generalized Atrex-Bench operators must live outside the AKA checkout: "
+                f"{resolved} is reachable from the agent workspace through its "
+                f"repository symlinks (for example tools/../{resolved.relative_to(REPO_ROOT)}). "
+                "Copy the operator directory outside the repository, or point --op-dir at "
+                "an Atrex-Bench checkout that is not vendored here. The vendored submodule "
+                "supplies the evaluator runtime, not a private operator corpus."
+            )
+        # Moving the operator out of the repository is not sufficient on its own: the
+        # vendored submodule ships its own copy of the same operator corpus, and that copy
+        # is reachable by the same traversal. Compare contents rather than directory names,
+        # so a renamed or relocated operator is caught too.
+        exact_shapes = resolved / "shapes.json"
+        if exact_shapes.is_file():
+            wanted = exact_shapes.read_bytes()
+            corpus = REPO_ROOT / "3rdparty" / "atrex-bench" / "data"
+            # Byte-identical catches a copy; the same operator name catches the same
+            # operator pinned at a different revision, whose cases are still a near copy.
+            leaked = next(
+                (
+                    vendored
+                    for vendored in sorted(corpus.glob("*/shapes.json"))
+                    if vendored.read_bytes() == wanted
+                    or vendored.parent.name == resolved.name
+                ),
+                None,
+            )
+            if leaked is not None:
+                raise RuntimeError(
+                    "this operator's exact shapes are also vendored in the AKA checkout at "
+                    f"{leaked.relative_to(REPO_ROOT)}, which the agent workspace can reach "
+                    "through its repository symlinks, so withholding them from the workspace "
+                    "achieves nothing. Remove that operator from the vendored submodule "
+                    "(a sparse checkout limited to src/ and scripts/ is enough for the "
+                    "evaluator), or run this campaign in leaderboard mode."
+                )
         public_problem = self.workspace / AGENT_PROBLEM_FILENAME
         if not public_problem.is_file():
             raise RuntimeError(
@@ -777,9 +820,9 @@ class Campaign:
         )
         if violations:
             return violations
-        from .numerical_policy import numerical_violations
+        from .precision_gate import blocking_violations
 
-        return numerical_violations(self, target)
+        return blocking_violations(self, target)
 
     def _link_runtime(self) -> None:
         from long_horizon.store import CampaignStore

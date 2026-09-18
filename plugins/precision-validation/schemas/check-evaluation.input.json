@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "description": "Atrex-Bench precision evidence returned by the GPU allocation, with the plan it must discharge.",
+  "additionalProperties": false,
+  "required": ["schema_version", "evaluation", "schedule", "world_size"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "evaluation": {
+      "type": "object",
+      "description": "Aggregated driver payload: schema_version, all_pass, runs, optional error."
+    },
+    "schedule": {
+      "type": "array",
+      "description": "The plan rows, in the order the cases were submitted.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["case_id", "shape_ids", "seeds", "selection_digest", "expected_probes"],
+        "properties": {
+          "case_id": {"type": "string", "minLength": 1},
+          "shape_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "seeds": {"type": "array", "items": {"type": "integer"}},
+          "selection_digest": {"type": "string", "minLength": 1},
+          "expected_probes": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "world_size": {"type": "integer", "minimum": 1}
+  }
+}

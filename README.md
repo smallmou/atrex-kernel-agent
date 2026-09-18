@@ -98,6 +98,9 @@ AKA builds on and learns from many open-source projects, including:
   [hpc-ops](https://github.com/Tencent/hpc-ops),
   [AIter](https://github.com/ROCm/aiter), [quack](https://github.com/Dao-AILab/quack), and
   [TileLang](https://github.com/tile-ai/tilelang).
+- Evaluation: [Atrex-Bench](https://github.com/smallmou/atrex-bench), vendored as
+  `3rdparty/atrex-bench` and used by the default `precision-validation` plugin as the
+  official correctness, tolerance and relative-L2 comparator.
 - Knowledge and agent tooling: [KernelWiki](https://github.com/mit-han-lab/KernelWiki),
   [modern-gpu-programming-for-mlsys](https://github.com/mlc-ai/modern-gpu-programming-for-mlsys),
   [ncu-report-skill](https://github.com/mit-han-lab/ncu-report-skill),

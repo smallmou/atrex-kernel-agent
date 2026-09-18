@@ -77,12 +77,43 @@ independent of framework/dependency review. The gate works with the Atrex
 other/fused operators share one runner, schedule and reviewer; the engine has no
 operator-name dispatch, fixed tensor names, TP-specific path or error-file parsing.
 
+The gate is owned by the default `precision-validation` plugin, not by the main line.
+`plugins/precision-validation/` holds the policy — the suite schema, the probe
+schedule, the input constructors, the GPU-side driver, and the evidence and review
+checks — exposed as the pure tools `plan`, `check-evaluation` and `check-review`.
+`orchestrator/precision_gate.py` keeps only what a plugin tool cannot own: the GPU
+allocation and its queue wait, the isolated agent sessions, and the evidence digest
+that binds a pass to the exact bytes that produced it. A plugin tool's timeout is
+capped at 3600 seconds, well under a gateway admission wait, so submission and the
+infrastructure retry loop deliberately stay on the supervisor side.
+
+The precision comparison itself — tolerances, relative-L2, output-tree structure and
+input-mutation checks — belongs to Atrex-Bench, vendored as the
+`3rdparty/atrex-bench` submodule and declared as the plugin's `atrex-bench-runtime`
+and `atrex-bench-runner` resources. Those resources are `mount: false`: the workspace
+already receives its own copy of the evaluator, and a plugin symlink would expose the
+checkout's private `data/` tree. For the same reason a generalized operator directory
+must live outside this repository — every workspace symlinks `tools/`, `reference/`,
+`skills/` and `reference-projects/` at the repository root, so an in-repo operator's
+exact `shapes.json` would be reachable by traversing out of one of them. Relocating the
+operator is not sufficient on its own, so the supervisor also refuses an external
+operator whose `shapes.json` is byte-identical to one vendored under
+`3rdparty/atrex-bench/data/`; a sparse checkout limited to `src/` and `scripts/` removes
+that copy. Both checks fail closed rather than silently handing over the hidden shapes.
+
+Before each gate run the supervisor rebuilds the plugin registry, re-fingerprints the
+plugin tree and re-checks it against `.atrex_plugins/lock.json`. The accept/reject policy
+is now a subprocess re-read from disk on every call and the repository is reachable from a
+workspace, so an edited policy must block promotion rather than relax it. Bumping the
+submodule or editing the plugin therefore makes an existing workspace unresumable, by
+design.
+
 An operator may supply private `numerical_suite.json`. Otherwise a read-only
 contract-author session builds 3–6 complementary cases from trusted reference,
 input and public contract files, without candidate source. The result is cached in
 `<private-reference>/.atrex_numerical/<contract-digest>/`; changed reference/input/
 shapes or author instructions invalidate it. Examples for attention, GEMM and norm
-are in `reference/numerical_suites/`. They illustrate mathematical risks, not fixed
+are in `plugins/precision-validation/examples/`. They illustrate mathematical risks, not fixed
 ABI names or universally valid numeric ranges. `constant(value)` constructs directly
 in the input dtype. Integer and boolean inputs require an integral value within
 the dtype's representable range (for example, 0 through 255 for `uint8`); invalid
@@ -154,6 +185,13 @@ files are restored in `finally`. Custom evaluators explicitly declare an
 `evaluator_files` bind adapters into the evidence digest. No guessed TP filenames
 or custom metric paths exist in the shared driver. Numerical metrics travel in
 RESULT_JSON; each operator retains its own official comparator and tolerances.
+
+Probes run the Atrex-Bench evaluator under its `untrusted` guard profile, which blocks
+runtime C++/CUDA extension loading and installs process-local anti-tampering guards.
+`Cuda` campaigns are downgraded to `trusted` because a CUDA candidate normally compiles
+through exactly that path; the resolved profile is recorded in the coverage receipt the
+reviewer sees. An operator-supplied `evaluator_command` owns its own profile and is
+never handed `--trust-mode`, since only the AKA harness is known to forward it.
 
 After dynamic probes pass, a separate read-only numerical reviewer checks domain,
 precision/reductions, nonlinear/quantization math, routing/boundaries and coverage.

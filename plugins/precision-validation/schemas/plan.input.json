@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "description": "One probe-schedule request for a candidate under an operator numerical suite.",
+  "additionalProperties": false,
+  "required": ["schema_version", "suite", "shapes"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "suite": {
+      "type": "object",
+      "description": "Operator-owned numerical suite, schema version 1."
+    },
+    "shapes": {
+      "type": "object",
+      "description": "Trusted shapes.json: shape id to its input_kwargs. Never exposed to the candidate."
+    },
+    "mode": {
+      "type": "string",
+      "description": "Gate depth. light samples one representative shape plus a rotating one; thorough covers both size extremes plus a rotating middle.",
+      "enum": ["light", "thorough"]
+    },
+    "rotation": {
+      "type": "string",
+      "description": "Evidence digest that rotates shape selection across candidates."
+    },
+    "framework_key": {
+      "type": "string",
+      "description": "AKA's normalized framework token, lowercase and alphanumeric (Cuda, CUDA C and cuda-c all arrive as cuda). The cuda token keeps the trusted guard profile because it compiles through runtime extension loading."
+    },
+    "trust_mode": {
+      "type": "string",
+      "description": "Requested Atrex-Bench guard profile before the framework downgrade.",
+      "enum": ["trusted", "untrusted"]
+    }
+  }
+}

@@ -74,8 +74,8 @@ def prepare_campaign(campaign: Campaign) -> None:
                 production_reviewer=campaign._review_production_candidate,
             )
             if not violations:
-                from orchestrator.numerical_policy import numerical_violations
-                numerical_errors = numerical_violations(campaign, campaign.workspace)
+                from orchestrator.precision_gate import blocking_violations
+                numerical_errors = blocking_violations(campaign, campaign.workspace)
                 if numerical_errors:
                     campaign._numerical_repair_head = (git_head(campaign.workspace), numerical_errors)
                     print("[orchestrator] numerical repair admission: HEAD is NOT numerically certified; "

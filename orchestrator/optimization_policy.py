@@ -94,6 +94,18 @@ def optimization_mode_directive(mode: str, framework: str) -> str:
             "into the candidate, or replace the implementation with a prebuilt operator.\n"
         )
         candidate_framework = framework
+    # `Cuda` candidates are evaluated under the trusted guard profile precisely because they
+    # compile through the runtime extension loading the untrusted profile blocks, so the
+    # restriction below must not be promised to them.
+    guard_rule = (
+        ""
+        if _framework_key(framework) == "cuda"
+        else (
+            "Its probes run the official evaluator under an anti-tampering guard profile that also "
+            "disables runtime C++/CUDA extension loading, so the candidate must not depend on "
+            "building native extensions during evaluation. "
+        )
+    )
     return (
         "## Optimization mode: production (hard gate)\n\n"
         "This generated section overrides any conflicting permissive framework or third-party-library "
@@ -112,8 +124,9 @@ def optimization_mode_directive(mode: str, framework: str) -> str:
         "It then reviews arithmetic, precision, value-range assumptions, quantization, nonlinear "
         "stability, routing and coverage against the trusted contract and reference. The "
         "operator-owned numerical_suite.json is used when present; otherwise the supervisor constructs and caches a compact suite from the trusted reference/input contract. Changing seeds in the ordinary "
-        "generator or passing dependency review cannot satisfy this gate. Missing evidence "
-        "or unresolved numerical risks block promotion in fast, full and goal modes.\n"
+        "generator or passing dependency review cannot satisfy this gate. "
+        f"{guard_rule}"
+        "Missing evidence or unresolved numerical risks block promotion in fast, full and goal modes.\n"
         "- Keep `solution.json` consistent with the implementation. Before committing, inspect `kernel.py` "
         "and `solution.json` against these rules. The supervisor will reject a candidate that lacks an "
         "evidence-backed production-policy verdict, even if it is faster and correct.\n"

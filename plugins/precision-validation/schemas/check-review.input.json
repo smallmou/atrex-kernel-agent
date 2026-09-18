@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "description": "An independent numerical review, the evidence digest it must be bound to, and the files it was allowed to cite.",
+  "additionalProperties": false,
+  "required": ["schema_version", "review", "evidence_digest", "supplied_files"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "review": {
+      "type": "object",
+      "description": "The reviewer's numerical_review.json payload, treated as untrusted data."
+    },
+    "evidence_digest": {"type": "string", "minLength": 1},
+    "supplied_files": {
+      "type": "array",
+      "description": "Logical evidence names the reviewer was given; a citation outside this set is a rejection.",
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

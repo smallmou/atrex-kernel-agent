@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "description": "Blocking precision violations. An empty list is the only accepting result.",
+  "additionalProperties": false,
+  "required": ["schema_version", "accepted", "violations"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "accepted": {"type": "boolean"},
+    "violations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

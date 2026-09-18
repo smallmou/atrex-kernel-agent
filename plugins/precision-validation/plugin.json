@@ -1,0 +1,35 @@
+{
+  "id": "precision-validation",
+  "version": "1.0.0",
+  "api_version": 1,
+  "tools": {
+    "plan": {
+      "description": "Validate an operator numerical suite and derive the probe schedule and guard profile for one candidate.",
+      "command": ["{python}", "{plugin_root}/adapter.py", "plan"],
+      "input_schema": "schemas/plan.input.json",
+      "output_schema": "schemas/plan.output.json",
+      "timeout_seconds": 120
+    },
+    "check-evaluation": {
+      "description": "Reject Atrex-Bench precision evidence that omits, reorders or under-covers a planned probe.",
+      "command": ["{python}", "{plugin_root}/adapter.py", "check-evaluation"],
+      "input_schema": "schemas/check-evaluation.input.json",
+      "output_schema": "schemas/verdict.output.json",
+      "timeout_seconds": 120
+    },
+    "check-review": {
+      "description": "Reject an independent numerical review that is unbound, incomplete or uncited, and surface its rejections.",
+      "command": ["{python}", "{plugin_root}/adapter.py", "check-review"],
+      "input_schema": "schemas/check-review.input.json",
+      "output_schema": "schemas/verdict.output.json",
+      "timeout_seconds": 120
+    }
+  },
+  "resources": {
+    "atrex-bench-runtime": {"path": "../../3rdparty/atrex-bench/src/atrex_bench", "optional": true, "mount": false},
+    "atrex-bench-runner": {"path": "../../3rdparty/atrex-bench/scripts/run_eval.py", "optional": true, "mount": false}
+  },
+  "instructions": {
+    "common": "instructions.md"
+  }
+}

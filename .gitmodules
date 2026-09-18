@@ -99,3 +99,6 @@
 	shallow = false
 	path = reference-projects/triton-for-sail
 	url = git@github.com:t-head/triton-for-sail.git
+[submodule "3rdparty/atrex-bench"]
+	path = 3rdparty/atrex-bench
+	url = git@github.com:smallmou/atrex-bench.git

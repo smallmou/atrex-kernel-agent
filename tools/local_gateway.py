@@ -547,6 +547,13 @@ def _find_atrex_bench_runner(explicit_root: Path | None = None) -> Path:
     if spec is not None and spec.origin:
         package_dir = Path(spec.origin).resolve().parent
         roots.append(package_dir.parent.parent)
+    # Last resort: the vendored submodule, but only when nothing was named explicitly.
+    # Silently substituting the repository pin for a wrong --atrex-bench-root or
+    # ATREX_BENCH_ROOT would evaluate against a different evaluator than the operator
+    # asked for; an explicitly named root must still fail loudly. Resolved locally
+    # because this module is deliberately stdlib-only.
+    if explicit_root is None and not configured:
+        roots.append(Path(__file__).resolve().parents[1] / "3rdparty" / "atrex-bench")
     for root in roots:
         runner = root.expanduser().resolve() / "scripts" / "run_eval.py"
         if runner.is_file():
