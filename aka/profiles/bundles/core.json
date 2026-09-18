@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "doc": "Rows every campaign boots. Row order is for readers only; load order comes from inject.",
+  "entries": [
+    {
+      "id": "legacy-campaign",
+      "name": "aka.plugins.legacy_campaign",
+      "required": true,
+      "doc": "Provides ctx.driver. Stage one still delegates to orchestrator/campaign.py, so a campaign behaves exactly as before while the tree is verified."
+    }
+  ]
+}

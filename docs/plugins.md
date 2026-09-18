@@ -5,6 +5,25 @@ AKA discovers plugins automatically from immediate subdirectories of `plugins/` 
 without another command-line option. A plugin may contribute tools, Skills, instructions, and
 workspace resources.
 
+## Two plugin roots
+
+There are two kinds of plugin, and they live in separate directories on purpose.
+
+| Root | Kind | Contract | Contributes |
+| --- | --- | --- | --- |
+| `plugins/<id>/` | **external** | `plugin.json` manifest; each tool is an argv command exchanging JSON over stdin and stdout, in its own process | Agent-facing tools, Skills, phase instructions, workspace resources |
+| `aka/plugins/<id>/` | **in-process** | the Python package module itself carries the declaration (`name`, `apply`, and optionally `Config`/`Defaults`/`inject`/`provide`); a composition row names the module | Capability services and event listeners inside the orchestrator |
+
+This document describes the external contract, which is unchanged. In-process plugins are what a
+campaign is *composed of*: `aka/profiles/` lists the rows, `--dump-config` prints the resulting
+tree, and `--patch` overrides a row.
+
+The roots are deliberately disjoint. A campaign workspace pins its external plugin set in
+`.atrex_plugins/lock.json`, and `check_lock` compares that file byte-for-byte against a freshly
+discovered snapshot; adding a directory under `plugins/` would therefore make every existing
+workspace unresumable. In-process plugins are never discovered by globbing — the composition names
+their modules — and they record themselves in the sibling file `.atrex_plugins/composition.json`.
+
 ## Design and runtime flow
 
 ```mermaid

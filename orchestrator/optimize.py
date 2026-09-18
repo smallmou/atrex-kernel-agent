@@ -76,7 +76,6 @@ if __name__ == "__main__":
 
 try:
     from . import agent_runtime as _agent_runtime
-    from .campaign import Campaign
     from .constants import (
         AGENT_CLI_CHOICES,
         DEFAULT_CONVERT_AFTER,
@@ -121,13 +120,8 @@ try:
     from .plugins import PluginError, PluginRegistry
     from .session_io import check_ssh_environment, detect_arch, ensure_submodules
     from .ssh_health import runtime_health_command
-    from .workspace_state import (
-        latest_version,
-        read_memory,
-    )
 except ImportError:  # direct script execution: python orchestrator/optimize.py
     from orchestrator import agent_runtime as _agent_runtime  # type: ignore[no-redef]
-    from orchestrator.campaign import Campaign  # type: ignore[no-redef]
     from orchestrator.constants import (  # type: ignore[no-redef]
         AGENT_CLI_CHOICES,
         DEFAULT_CONVERT_AFTER,
@@ -180,10 +174,6 @@ except ImportError:  # direct script execution: python orchestrator/optimize.py
         ensure_submodules,
     )
     from orchestrator.ssh_health import runtime_health_command  # type: ignore[no-redef]
-    from orchestrator.workspace_state import (  # type: ignore[no-redef]
-        latest_version,
-        read_memory,
-    )
 
 
 def _without_cli_options(argv: list[str], option_names: tuple[str, ...]) -> list[str]:
@@ -708,6 +698,30 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         "directory. Default: current working directory.",
     )
     ap.add_argument("--workspace-suffix", default="", help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--profile",
+        default="default",
+        help="Plugin composition profile to boot (default: default). See aka/profiles/.",
+    )
+    ap.add_argument(
+        "--patch",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="Composition patch file applied over the profile (repeatable). A patch replaces "
+        "a row's whole config by id, or inserts/removes/disables a row.",
+    )
+    ap.add_argument(
+        "--dump-config",
+        action="store_true",
+        help="Print the composed plugin tree and exit without running a campaign.",
+    )
+    ap.add_argument(
+        "--dump-config-format",
+        choices=("text", "json"),
+        default="text",
+        help="Format for --dump-config (default: text).",
+    )
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = ap.parse_args(raw_argv)
     try:
@@ -720,6 +734,14 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         ap.error(
             "--workspace-suffix must be a normalized lowercase alphanumeric/underscore suffix"
         )
+    if args.dump_config and not args.framework:
+        ap.error(
+            "--dump-config requires an explicit --framework: without one this command "
+            "dispatches one child campaign per framework, and each composes its own tree"
+        )
+    for patch in args.patch:
+        if not Path(patch).is_file():
+            ap.error(f"--patch file does not exist: {patch}")
     if not 1 <= args.sandbox_timeout <= MAX_SANDBOX_TIMEOUT:
         ap.error(
             "--sandbox-timeout must be in the gateway-supported range "
@@ -846,7 +868,9 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         Path(args.workspace).mkdir(parents=True, exist_ok=True)
 
     op = _resolve_op(args.op_dir, args.optimization_mode)
-    if args.sandbox_ssh:
+    # --dump-config reports the tree that would boot. It must not arm remote recovery, probe a
+    # GPU host, or initialize submodules, so it stays usable for review and in CI.
+    if args.sandbox_ssh and not args.dump_config:
         workspace_base = Path(args.workspace) if args.workspace else Path.cwd()
         configure_recovery(
             workspace_base=workspace_base,
@@ -889,7 +913,8 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-    ensure_submodules(args.platform, arch or "")
+    if not args.dump_config:
+        ensure_submodules(args.platform, arch or "")
     frameworks = (
         (args.framework,)
         if args.framework
@@ -931,52 +956,75 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         args.framework, args.platform, args.optimization_mode
     )
 
-    campaign = Campaign(
-        name=op["name"],
-        kernel_demo=op["reference"],
-        platform=args.platform,
-        framework=args.framework,
-        notes=args.notes,
-        arch=arch,
-        sandbox_hardware=sandbox_hardware,
-        sandbox_profile=args.sandbox_profile,
-        sandbox_url=args.sandbox_url,
-        sandbox_ssh=args.sandbox_ssh,
-        sandbox_ssh_init=args.sandbox_ssh_init,
-        sandbox_ssh_gpu=args.sandbox_ssh_gpu,
-        sandbox_health_command=args.sandbox_health_command,
-        sandbox_timeout=args.sandbox_timeout,
-        atrex_bench_root=op.get("atrex_bench_root", ""),
-        agent_cli=args.agent_cli,
-        optimization_mode=args.optimization_mode,
-        work_dir=args.workspace,
-        workspace_suffix=workspace_suffix,
-        max_iters=args.max_iters,
-        fast_episodes=args.fast_episodes,
-        fast_trials=args.fast_trials,
-        token_budget=args.token_budget,
-        target_util=args.target_util,
-        setup_timeout=args.setup_timeout,
-        max_stall=args.max_stall,
-        framework_baseline=args.framework_baseline,
-        framework_baseline_timeout=args.framework_baseline_timeout,
-        handoff_resumes=args.handoff_resumes,
-        numerical_gate=args.numerical_gate,
-        repair_numerical_head=args.repair_numerical_head,
-        production_review_timeout=args.production_review_timeout,
-        numerical_review_timeout=args.numerical_review_timeout,
-        verify_repeats=args.verify_repeats,
-        verify_run_timeout=args.verify_run_timeout,
-        min_improvement_pct=args.min_improvement_pct,
-        long_reviewer_session=args.long_reviewer_session,
-        v1_ask_codex=args.v1_ask_codex,
-        v1_ask_qoder=args.v1_ask_qoder,
-        fast_episode_ask_codex=args.fast_episode_ask_codex,
-        fast_episode_ask_qoder=args.fast_episode_ask_qoder,
-        full_episode_ask_codex=args.full_episode_ask_codex,
-        full_episode_ask_qoder=args.full_episode_ask_qoder,
-        convert_after=args.convert_after,
+    # Campaign configuration reaches the tree as the top composition layer, so every value is
+    # schema validated against the owning plugin before anything is constructed.
+    from aka.boot import boot as _boot
+    from aka.cli import campaign_composition, dump_composition
+
+    campaign_values = {
+        "name": op["name"],
+        "kernel_demo": op["reference"],
+        "platform": args.platform,
+        "framework": args.framework,
+        "notes": args.notes,
+        "arch": arch,
+        "sandbox_hardware": sandbox_hardware,
+        "sandbox_profile": args.sandbox_profile,
+        "sandbox_url": args.sandbox_url,
+        "sandbox_ssh": args.sandbox_ssh,
+        "sandbox_ssh_init": args.sandbox_ssh_init,
+        "sandbox_ssh_gpu": args.sandbox_ssh_gpu,
+        "sandbox_health_command": args.sandbox_health_command,
+        "sandbox_timeout": args.sandbox_timeout,
+        "atrex_bench_root": op.get("atrex_bench_root", ""),
+        "agent_cli": args.agent_cli,
+        "optimization_mode": args.optimization_mode,
+        "work_dir": args.workspace,
+        "workspace_suffix": workspace_suffix,
+        "max_iters": args.max_iters,
+        "fast_episodes": args.fast_episodes,
+        "fast_trials": args.fast_trials,
+        "token_budget": args.token_budget,
+        "target_util": args.target_util,
+        "setup_timeout": args.setup_timeout,
+        "max_stall": args.max_stall,
+        "framework_baseline": args.framework_baseline,
+        "framework_baseline_timeout": args.framework_baseline_timeout,
+        "handoff_resumes": args.handoff_resumes,
+        "numerical_gate": args.numerical_gate,
+        "repair_numerical_head": args.repair_numerical_head,
+        "production_review_timeout": args.production_review_timeout,
+        "numerical_review_timeout": args.numerical_review_timeout,
+        "verify_repeats": args.verify_repeats,
+        "verify_run_timeout": args.verify_run_timeout,
+        "min_improvement_pct": args.min_improvement_pct,
+        "long_reviewer_session": args.long_reviewer_session,
+        "v1_ask_codex": args.v1_ask_codex,
+        "v1_ask_qoder": args.v1_ask_qoder,
+        "fast_episode_ask_codex": args.fast_episode_ask_codex,
+        "fast_episode_ask_qoder": args.fast_episode_ask_qoder,
+        "full_episode_ask_codex": args.full_episode_ask_codex,
+        "full_episode_ask_qoder": args.full_episode_ask_qoder,
+        "convert_after": args.convert_after,
+    }
+    composition = campaign_composition(
+        campaign_values,
+        profile=args.profile,
+        patch_files=[Path(patch) for patch in args.patch],
+        variables={
+            "workspace": args.workspace,
+            "operator": op["name"],
+            "platform": args.platform,
+            "arch": arch,
+            "framework": args.framework,
+            "optimization_mode": args.optimization_mode,
+        },
     )
+    if args.dump_config:
+        print(dump_composition(composition, fmt=args.dump_config_format))
+        return 0
+    report = _boot(composition)
+    driver = report.service("driver")
     trace_status = "failed"
     handled_signals = (signal.SIGTERM, signal.SIGHUP)
     previous_handlers = {
@@ -992,36 +1040,19 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
     for handled_signal in handled_signals:
         signal.signal(handled_signal, interrupt_campaign)
     try:
-        if latest_version(campaign.workspace) < 0:
-            campaign.setup_baseline()
-        else:
-            print(
-                f"[orchestrator] resuming workspace at v{latest_version(campaign.workspace)}",
-                flush=True,
-            )
-            campaign._link_runtime()
-        baseline_coverage_problem = campaign._generalized_memory_coverage_problem(
-            read_memory(campaign.workspace, 0)
+        # A recovery monitor may declare success only after operator resolution,
+        # architecture/submodule setup, campaign construction, and workspace resume.
+        result = driver.run(
+            on_prepared=signal_restart_ready if args.sandbox_ssh else None
         )
-        if baseline_coverage_problem:
-            raise RuntimeError(
-                "generalized campaign baseline is incompatible with authoritative per-shape "
-                f"memory: {baseline_coverage_problem}; start a fresh workspace"
-            )
-        if args.sandbox_ssh:
-            # A recovery monitor may declare success only after operator resolution,
-            # architecture/submodule setup, campaign construction, and workspace resume.
-            signal_restart_ready()
-        campaign.ensure_framework_baseline()
-        campaign.run()
-        trace_status = "completed"
-        return 0
+        trace_status = result.status
+        return result.exit_code
     except KeyboardInterrupt:
         trace_status = "interrupted"
         raise
     finally:
         write_trace_retention_manifest(
-            campaign.workspace,
+            driver.workspace,
             trace_status,
             hardware={
                 "platform": args.platform,
@@ -1029,6 +1060,7 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
                 "sandbox_hardware": sandbox_hardware,
             },
         )
+        report.dispose()
         for handled_signal, previous_handler in previous_handlers.items():
             signal.signal(handled_signal, previous_handler)
 

@@ -1,0 +1,6 @@
+{
+  "api_version": 1,
+  "doc": "The supported campaign composition. Bundles stack in listed order; patches replace a row's whole config by id.",
+  "bundles": ["core"],
+  "patches": []
+}

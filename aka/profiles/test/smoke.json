@@ -1,0 +1,14 @@
+{
+  "api_version": 1,
+  "doc": "Test composition: a stub driver plus a consumer, so the real loader path runs without a GPU.",
+  "bundles": ["stubs"],
+  "patches": [
+    {
+      "id": "stub-driver",
+      "config": {
+        "campaign_name": "smoke",
+        "workspace": "${aka:workspace}"
+      }
+    }
+  ]
+}

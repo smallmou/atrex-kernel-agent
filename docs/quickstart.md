@@ -411,7 +411,18 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
 --verify-run-timeout S           Full-mode evaluator budget per ABBA run (default: 120)
 --min-improvement-pct PCT        Strict gain required in fast or full verification
 --arch ARCH                      Override runtime architecture detection
+--profile NAME                   Plugin composition profile to boot (default: default)
+--patch FILE                     Composition patch applied over the profile (repeatable)
+--dump-config                    Print the composed plugin tree and exit
+--dump-config-format FORMAT      text (default) or json
 ```
+
+A campaign is a plugin tree composed from `aka/profiles/`. `--dump-config` prints the tree that
+would boot, including which composition layer set each configuration field, and exits without
+running anything, arming remote recovery, or initializing submodules. It requires an explicit
+`--framework`, because omitting one dispatches a child campaign per framework and each composes
+its own tree. `--patch` replaces a row's whole configuration by id, or inserts, removes, or
+disables a row; see [Local plugins](plugins.md).
 
 Run `python orchestrator/optimize.py --help` for the complete current interface. Some Qoder models
 report zero token usage in stream JSON; in that case `--token-budget` cannot be enforced, so

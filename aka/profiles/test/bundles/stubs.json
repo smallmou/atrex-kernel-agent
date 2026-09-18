@@ -1,0 +1,17 @@
+{
+  "api_version": 1,
+  "doc": "The consumer is listed before its provider on purpose: load order comes from inject, never from row order.",
+  "entries": [
+    {
+      "id": "driver-observer",
+      "name": "aka.testing.driver_observer",
+      "doc": "Requires ctx.driver; must wait in PENDING until the provider appears."
+    },
+    {
+      "id": "stub-driver",
+      "name": "aka.testing.stub_driver",
+      "required": true,
+      "doc": "Provides ctx.driver."
+    }
+  ]
+}
