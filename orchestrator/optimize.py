@@ -46,6 +46,10 @@ Usage
         --op-dir /path/to/op --platform H20 --framework Triton \
         --optimization-mode production
 
+    # economy: one Wiki-selected framework, correctness first, default max-iters=10:
+    python orchestrator/optimize.py \
+        --op-dir /path/to/op --platform H20 --optimization-mode economy
+
 """
 
 from __future__ import annotations
@@ -565,7 +569,8 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         default="leaderboard",
         help="leaderboard preserves the permissive current CLAUDE.md flow; production keeps "
         "deterministic structure/state gates and requires an independent fail-closed full-candidate "
-        "framework, compute-provenance, dependency, loader, and manifest review.",
+        "framework, compute-provenance, dependency, loader, and manifest review; economy reuses "
+        "Wiki prototypes in one framework-free campaign with compact single-candidate episodes.",
     )
     ap.add_argument(
         "--framework",
@@ -574,7 +579,8 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         "launch all frameworks supported by the detected hardware in parallel: NVIDIA uses "
         "Triton/CuteDSL/Cuda/TileLang, AMD uses Triton/FlyDSL/TileLang, PPU uses "
         "Triton/Cuda/TileLang, and unknown hardware uses Triton/TileLang. "
-        "Each auto-dispatched production child is bound to its assigned framework.",
+        "Each auto-dispatched production child is bound to its assigned framework. "
+        "Omit this option in economy mode; Wiki selects the implementation framework.",
     )
     ap.add_argument(
         "--notes", default="none", help="Extra constraints / known bottlenecks."
@@ -582,8 +588,8 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument(
         "--max-iters",
         type=int,
-        default=20,
-        help="Hard cap on canonical optimization versions/episodes.",
+        default=None,
+        help="Hard cap on canonical optimization versions/episodes (economy: 10; otherwise: 20).",
     )
     ap.add_argument(
         "--fast-episodes",
@@ -654,8 +660,8 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         default="auto",
         help="Run one dedicated session after V0 setup that "
         "replaces the V0 PyTorch wrapper with the first self-contained framework "
-        "kernel, recorded as v1 (so optimization episodes start at v2). Production "
-        "auto = production mode only; always = leaderboard too; "
+        "kernel, recorded as v1 (so optimization episodes start at v2). "
+        "auto = production and economy; always = leaderboard too; "
         "never = optimize directly from the V0 kernel.",
     )
     ap.add_argument(
@@ -667,8 +673,8 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument(
         "--max-stall",
         type=int,
-        default=0,
-        help="Optional: stop after N consecutive unpromoted episodes (0 = disabled). "
+        default=None,
+        help="Stop after N consecutive unpromoted episodes (economy: 2; otherwise: 0 = disabled). "
         "After 50 completed episodes, more than 3 stalls instead enable goal mode; "
         "goal mode takes precedence over this stop condition.",
     )
@@ -697,6 +703,13 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--workspace-suffix", default="", help=argparse.SUPPRESS)
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = ap.parse_args(raw_argv)
+    if args.max_iters is None:
+        args.max_iters = 10 if args.optimization_mode == "economy" else 20
+    if args.optimization_mode == "economy":
+        if args.framework:
+            ap.error("economy mode selects a framework from Wiki; omit --framework")
+        if args.framework_baseline == "never":
+            ap.error("economy mode requires a correctness-first Wiki baseline; omit --framework-baseline never")
     try:
         PluginRegistry()
     except PluginError as exc:
@@ -767,7 +780,7 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         args.sandbox_ssh_gpu = int(raw_ssh_gpu)
         if args.sandbox_ssh_gpu > 31:
             ap.error("--sandbox-ssh-gpu must be in the range 0..31")
-        if not args.framework:
+        if not args.framework and args.optimization_mode != "economy":
             ap.error(
                 "--sandbox-ssh requires an explicit --framework so one assigned GPU "
                 "cannot be shared by auto-dispatched campaigns"
@@ -864,7 +877,7 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         args.sandbox_ssh_init,
         args.sandbox_health_command,
     )
-    if not arch and args.framework:
+    if not arch and (args.framework or args.optimization_mode == "economy"):
         suffix = args.workspace_suffix or framework_workspace_suffix(
             args.framework, args.platform, args.optimization_mode
         )
@@ -876,11 +889,12 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-    ensure_submodules(args.platform, arch or "")
+    if args.optimization_mode != "economy":
+        ensure_submodules(args.platform, arch or "")
     frameworks = (
-        (args.framework,)
-        if args.framework
-        else supported_frameworks(args.platform, arch)
+        ("wiki-selected",)
+        if args.optimization_mode == "economy"
+        else ((args.framework,) if args.framework else supported_frameworks(args.platform, arch))
     )
     print(
         f"[orchestrator] op={op['name']} agent_cli={args.agent_cli} "
@@ -903,7 +917,7 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         flush=True,
     )
 
-    if not args.framework:
+    if not args.framework and args.optimization_mode != "economy":
         base = Path(args.workspace).resolve() if args.workspace else Path.cwd()
         return dispatch_framework_campaigns(
             raw_argv,

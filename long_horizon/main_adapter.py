@@ -31,7 +31,7 @@ from orchestrator.hardware import (
     head_kernel_is_gluon,
     should_convert_to_gluon,
 )
-from orchestrator.optimization_policy import install_workspace_policy
+from orchestrator.optimization_policy import candidate_structure_violations, install_workspace_policy
 from orchestrator.session_io import _sandbox_command
 from orchestrator.workspace_runtime import (
     _agent_runtime_directive,
@@ -112,7 +112,10 @@ def episode_directives(
         "agent_runtime": _agent_runtime_directive(
             agent_cli, is_ppu=hardware_vendor(campaign.platform, campaign.arch) == "ppu"
         ),
-        "plan_generator": _plan_generator_directive(agent_cli, version),
+        "plan_generator": (
+            "" if campaign.optimization_mode == "economy"
+            else _plan_generator_directive(agent_cli, version)
+        ),
     }
 
 
@@ -276,6 +279,8 @@ def candidate_policy_violations(
     *,
     require_gluon: bool = False,
 ) -> list[str]:
+    if campaign.optimization_mode == "economy":
+        return candidate_structure_violations(workspace)
     if campaign.optimization_mode != "production":
         return []
     return campaign._production_kernel_violations(
@@ -285,6 +290,8 @@ def candidate_policy_violations(
 
 
 def conversion_required(campaign: Campaign, stall: int, workspace: Path) -> bool:
+    if campaign.optimization_mode == "economy":
+        return False
     return should_convert_to_gluon(
         campaign.framework,
         stall,

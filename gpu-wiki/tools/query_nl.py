@@ -156,21 +156,35 @@ FAST_BRIDGE_RE = re.compile(
     r"\s*\.\s*$",
     re.IGNORECASE,
 )
+ECONOMY_BRIDGE_RE = re.compile(
+    r"^\s*Target\s+hardware\s+(?P<hardware>[^,\r\n]+?)\s*,\s*"
+    r"runtime\s+architecture\s+(?P<architecture>[A-Za-z0-9_-]+)\s*\.\s*"
+    r"Reuse\s+a\s+prototype\s+for\s+operator\s+(?P<operator>[^\r\n]+?)\s*\.\s*$",
+    re.IGNORECASE,
+)
 
 
 def deterministic_bridge_intent(request: str) -> dict | None:
     """Handle the optimizer's narrow standard request without launching an LLM."""
-    match = FAST_BRIDGE_RE.fullmatch(request)
+    economy = ECONOMY_BRIDGE_RE.fullmatch(request)
+    match = economy or FAST_BRIDGE_RE.fullmatch(request)
     if match is None:
         return None
-    requested = (match.group("retrieve") or "techniques").casefold()
+    requested = (
+        "techniques and pitfalls"
+        if economy else (match.group("retrieve") or "techniques").casefold()
+    )
     intents = ["technique"] if "techniques" in requested else []
     if "pitfalls" in requested:
         intents.append("pitfall")
     doc = {
-        "architecture": match.group("hardware"),
+        "architecture": (
+            match.group("architecture")
+            if economy and match.group("architecture").casefold() != "unknown"
+            else match.group("hardware")
+        ),
         "vendor": None,
-        "dsl": match.group("dsl"),
+        "dsl": None if economy else match.group("dsl"),
         "operator_terms": [match.group("operator")],
         "component_terms": [],
         "measured_symptoms": [],

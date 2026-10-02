@@ -18,8 +18,9 @@ agent in this repository to translate the task into that command and start the c
 - NVIDIA workers: `ncu`, wrapped by `tools/profile_nvidia.sh`
 - AMD workers: `rocprofv3`, wrapped by `tools/profile_kernel.sh`
 
-The orchestrator verifies required submodules before starting and initializes missing ones
-automatically; the large `reference-projects/` collection remains optional. On PPU hardware the
+Leaderboard and production verify required submodules before starting and initialize missing ones
+automatically. Economy skips profiler/reference-project initialization and does not require a GPU
+profiler. The large `reference-projects/` collection remains optional. On PPU hardware the
 t-head projects in that collection are the only PPU-specific implementation references available, and
 they clone over SSH (`git@github.com:t-head/...`), so initialize them with an SSH key that can reach
 that org. `reference-projects/README.md` indexes every project by vendor, DSL, and operator.
@@ -119,8 +120,9 @@ python orchestrator/optimize.py \
 `--sandbox-ssh-gpu` is required and selects one physical NVIDIA index. The runner resolves that index
 to its GPU UUID, exposes only its device node plus common driver control nodes, and exports UUID-based
 `CUDA_VISIBLE_DEVICES`. MIG-enabled GPUs and MIG/UUID selectors fail closed because their capability
-nodes are not assigned yet. SSH mode also requires an explicit `--framework`; automatic parallel
-framework dispatch is rejected, and multi-shape ABBA batches are serialized on the assigned card.
+nodes are not assigned yet. SSH mode requires an explicit `--framework` for leaderboard/production;
+economy runs one Wiki-selected campaign without this option. Automatic parallel framework dispatch
+is rejected, and multi-shape ABBA batches are serialized on the assigned card.
 
 `--sandbox-ssh-runtime-bind REMOTE_PATH[=SANDBOX_PATH]` is repeatable. A single path preserves its
 location; the `source=destination` form can mount it elsewhere. The bind is read-only. For example, a
@@ -308,7 +310,7 @@ leaving provider credentials in Pi's normal auth/config files. `ATREX_PI_SESSION
 
 ### Multi-framework campaigns
 
-Omit `--framework` to run every framework supported by the detected GPU concurrently:
+In leaderboard or production, omit `--framework` to run every framework supported by the detected GPU concurrently:
 
 ```bash
 python orchestrator/optimize.py \
@@ -323,6 +325,37 @@ flat names such as `/path/to/runs/kernel_opt_<name>_triton_h20`; production work
 `_production`. `--max-iters` and `--token-budget` apply independently to each framework campaign.
 Passing `--framework` selects one campaign but keeps the same mode-specific naming convention.
 Every campaign optimizes the complete workload set in one version line.
+
+### Economy mode
+
+Use `--optimization-mode economy` when token cost and turnaround matter more than peak performance:
+
+```bash
+python orchestrator/optimize.py \
+    --op-dir /path/to/operator --platform H20 \
+    --optimization-mode economy --agent-cli claude \
+    --workspace /path/to/runs
+```
+
+Omit `--framework`: AKA launches one campaign in `kernel_opt_<name>_economy_<platform>`, retrieves
+up to three Wiki records across DSLs (12 KB payload budget), and adapts the closest compatible
+prototype using installed tooling. The standard framework-free request is parsed deterministically
+without a bridge-agent call. V1 must pass full-workload correctness with five additional random
+seeds; its performance may initially be worse than V0. The selected prototype, emitted attribution
+IDs and adaptations are saved in a short committed summary for reuse after restarts and in later
+episodes. If no usable prototype or recipe is available after one focused follow-up, the campaign
+reports the coverage/tooling blocker.
+
+The default `--max-iters` is **10**, including V1; override it explicitly for a different cap.
+Each later episode uses medium reasoning effort, one small implementation change and one
+full-workload base-seed evaluator. Promotion requires a passing result whose exact kernel/manifest
+matches the measured bytes and whose score improves over the incumbent, using the existing fast
+verification path. There is no profiling, ABBA, plan generation, external review, automatic
+framework conversion or switch to full/goal episodes. Stage review and fast-trial flags do not widen
+the economy workflow. Reuse saved Wiki knowledge; query again only for a new measured blocker
+or missing implementation fact (up to two records and an 8 KB budget). By default, two consecutive
+episodes without promotion stop the campaign; `--max-stall 0` disables that early stop.
+`--token-budget` also retains its episode token cap. Economy supports SSH without a framework.
 
 ### Production mode
 
@@ -375,7 +408,7 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
 ### Common options
 
 ```text
---max-iters N                    Hard cap on canonical versions/episodes
+--max-iters N                    Hard cap on canonical versions/episodes (economy: 10; others: 20)
 --fast-episodes N                Fast post-baseline episodes (default: 2; 0 disables)
 --token-budget N                 Hard token cap across episode turns (0 = no cap)
 --agent-cli CLI                  claude (default), qodercli, codex, or pi
@@ -390,9 +423,9 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
                                                     Configure full ask-codex (default: off)
 --full-episode-ask-qoder / --no-full-episode-ask-qoder
                                                     Configure full ask-qoder (default: off)
---optimization-mode MODE         leaderboard (default) or production
+--optimization-mode MODE         leaderboard (default), production, or economy
 --framework DSL                  Explicit DSL; omit for automatic parallel dispatch
---framework-baseline MODE        auto (production only), always, or never
+--framework-baseline MODE        auto (production/economy), always, or never (not in economy)
 --framework-baseline-timeout S   Framework bring-up wall-clock budget (default: 10800)
 --target-util PCT                Peak-utilization short-circuit (default: 90)
 --setup-timeout S                Legacy V0/problem-authoring session timeout (default: 7200)

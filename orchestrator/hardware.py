@@ -78,6 +78,8 @@ def framework_workspace_suffix(
     uses a distinct path so its immutable policy and Git history can coexist
     with a prior leaderboard campaign under the same workspace root.
     """
+    if optimization_mode == "economy":
+        return f"economy_{_workspace_slug(platform)}"
     suffix = f"{_workspace_slug(framework)}_{_workspace_slug(platform)}"
     if optimization_mode == "production":
         suffix += "_production"

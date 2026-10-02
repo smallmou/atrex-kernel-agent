@@ -124,6 +124,17 @@ Do not substitute a scheduler label for the product name. Product normalization
 only repairs formatting differences such as case, separators, or vendor wrappers;
 it does not translate one hardware identity into another.
 
+Economy Mode uses a bounded framework-free request that also skips the bridge agent:
+
+```text
+Target hardware H20, runtime architecture sm_90. Reuse a prototype for operator rmsnorm.
+```
+
+It preserves the exact operator identifier, scopes retrieval by the runtime architecture and
+searches across DSLs. `unknown` architecture falls back to the explicitly named hardware product.
+AKA supplies `max_records: 3` and `max_bytes: 12000` and reuses the selected prototype summary in
+later episodes.
+
 ## 4. The bridge stays small; scripts perform retrieval
 
 `query_bridge_agent` has one job: convert prose into typed semantic intent. It

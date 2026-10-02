@@ -94,6 +94,20 @@ class fake_bridge:
 
 
 class IntentValidationTests(unittest.TestCase):
+    def test_economy_request_preserves_runtime_scope_and_has_no_dsl(self):
+        request = "Target hardware H20, runtime architecture sm_90. Reuse a prototype for operator fused.norm-v2."
+        intent = query_nl.deterministic_bridge_intent(request)
+        self.assertEqual(intent["architecture"], "sm_90")
+        self.assertIsNone(intent["dsl"])
+        self.assertEqual(intent["operator_terms"], ["fused.norm-v2"])
+        self.assertEqual(intent["intents"], ["technique", "pitfall"])
+        fallback = query_nl.deterministic_bridge_intent(request.replace("sm_90", "unknown"))
+        self.assertEqual(fallback["architecture"], "H20")
+        standard = query_nl.deterministic_bridge_intent(
+            "Target hardware H20, DSL triton. Optimize operator rmsnorm and retrieve techniques and pitfalls."
+        )
+        self.assertEqual(standard["dsl"], "triton")
+
     def test_rejects_non_object(self):
         with self.assertRaises(SystemExit):
             query_nl.validate_intent([])
@@ -310,6 +324,20 @@ class StoreResolutionTests(unittest.TestCase):
 @unittest.skipUnless(STORE_OK, "store not built")
 class FrontDoorTests(unittest.TestCase):
     REQUEST = "fused rmsnorm in triton on sm_100"
+
+    def test_economy_retrieval_runs_without_a_bridge_agent(self):
+        request = "Target hardware H20, runtime architecture sm_90. Reuse a prototype for operator rmsnorm."
+        with fake_bridge(None, write=False) as bridge:
+            code, out, _ = run_front_door(
+                request, "--store-root", str(STORE), "--max-records", "3", "--max-bytes", "12000",
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(bridge.prompts, [])
+        result = json.loads(out)
+        self.assertLessEqual(len(result["records"]), 3)
+        self.assertTrue(result["query_id"].startswith("wiki-query-"))
+        for record in result["records"].values():
+            self.assertIn("::", record["wiki_id"])
 
     def test_dry_run_is_store_blind_and_spawns_nothing(self):
         with fake_bridge(None, write=False) as bridge:

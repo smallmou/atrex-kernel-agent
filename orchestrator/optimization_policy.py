@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 
-OPTIMIZATION_MODE_CHOICES = ("leaderboard", "production")
+OPTIMIZATION_MODE_CHOICES = ("leaderboard", "production", "economy")
 MODE_STATE_FILE = ".orchestrator_mode.json"
 POLICY_BEGIN = "<!-- ATREX_OPTIMIZATION_MODE_POLICY_BEGIN -->"
 POLICY_END = "<!-- ATREX_OPTIMIZATION_MODE_POLICY_END -->"
@@ -68,6 +68,20 @@ def source_uses_gluon(source: str) -> bool:
 
 def optimization_mode_directive(mode: str, framework: str) -> str:
     """Self-contained policy block injected into every coding-agent prompt."""
+    if mode == "economy":
+        return (
+            "## Optimization mode: economy\n\n"
+            "Reuse GPU Wiki prototype code as the primary implementation source. Select the "
+            "framework from the most applicable prototype and preinstalled runtime; there is no "
+            "assigned DSL or mandatory framework conversion. First adapt the prototype to the "
+            "immutable operator contract and pass full-workload correctness, even if initially "
+            "slower than V0. Then make one small evidence-backed change per episode.\n"
+            "Keep context compact: reuse the saved prototype summary and recent evidence, bound "
+            "Wiki results, and avoid repeated queries, broad research, profiling, planning agents "
+            "and external reviews. The active economy prompt owns validation and handoff. "
+            "Never change evaluator inputs, tolerances or timing; never cache input values or "
+            "outputs. Keep executable candidate code in kernel.py and its manifest accurate.\n"
+        )
     if mode == "leaderboard":
         return (
             "## Optimization mode: leaderboard\n\n"
@@ -263,21 +277,8 @@ def _solution_structure_violations(workspace: Path) -> list[str]:
     return []
 
 
-def production_structure_violations(
-    workspace: Path,
-    framework: str,
-    *,
-    require_gluon: bool = False,
-) -> list[str]:
-    """Return only mechanically certain production-candidate violations.
-
-    Framework ownership, compute provenance, dependency use, dynamic loading, and manifest
-    semantics deliberately do not belong here. The supervisor's isolated reviewer judges
-    those questions from the complete candidate.
-    """
-    key = _framework_key(framework)
-    if key not in _SUPPORTED_PRODUCTION_FRAMEWORKS:
-        return [f"unsupported production framework: {framework}"]
+def candidate_structure_violations(workspace: Path) -> list[str]:
+    """Check that Python candidate sources can be versioned and embedded."""
     kernel_path = workspace / "kernel.py"
     if not kernel_path.is_file():
         return ["kernel.py is missing"]
@@ -290,9 +291,25 @@ def production_structure_violations(
     errors: list[str] = []
     if _has_relative_import(tree):
         errors.append("relative/local-module imports are not self-contained")
-    if require_gluon and not source_uses_gluon(source):
-        errors.append("switching back from the accepted Gluon phase to Triton is forbidden")
     errors.extend(_solution_structure_violations(workspace))
+    return list(dict.fromkeys(errors))
+
+
+def production_structure_violations(
+    workspace: Path,
+    framework: str,
+    *,
+    require_gluon: bool = False,
+) -> list[str]:
+    """Check structure locally; the independent reviewer judges compute provenance."""
+    if _framework_key(framework) not in _SUPPORTED_PRODUCTION_FRAMEWORKS:
+        return [f"unsupported production framework: {framework}"]
+    errors = candidate_structure_violations(workspace)
+    kernel_path = workspace / "kernel.py"
+    if require_gluon and kernel_path.is_file() and not source_uses_gluon(
+        kernel_path.read_text(encoding="utf-8", errors="replace")
+    ):
+        errors.append("switching back from the accepted Gluon phase to Triton is forbidden")
     return list(dict.fromkeys(errors))
 
 

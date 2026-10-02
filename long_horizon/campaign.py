@@ -46,6 +46,7 @@ from .verifier import GatewayABBAValidator
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = MODULE_ROOT / "orchestrator" / "prompts" / "episode.md"
 FAST_PROMPT_PATH = MODULE_ROOT / "orchestrator" / "prompts" / "fast_episode.md"
+ECONOMY_PROMPT_PATH = MODULE_ROOT / "orchestrator" / "prompts" / "economy_episode.md"
 GOAL_AFTER_EPISODES = 50
 GOAL_STALL_THRESHOLD = 3
 GOAL_HANDOFF_RESUMES = 20
@@ -446,17 +447,21 @@ def _memory_profile_evidence(
     is_ppu: bool,
     promoted: bool,
     episode_workspace: Path | None,
+    optimization_mode: str = "",
 ) -> dict[str, Any]:
     """Build canonical profile memory without changing non-PPU behavior."""
     experiment_count = len(journal.get("experiments", []))
     if episode_mode == "fast":
+        economy = optimization_mode == "economy"
         return {
-            "tool_used": "none (fast mode)",
+            "tool_used": "none (economy mode)" if economy else "none (fast mode)",
             "evidence_summary": f"{experiment_count} structured experiments",
-            "bottleneck_type": "not_profiled_fast_mode",
+            "bottleneck_type": "not_profiled_economy_mode" if economy else "not_profiled_fast_mode",
             "evidence_chain": (
-                f"{fast_trial_count} reviewed plan -> implementation -> evaluator "
-                "trials -> "
+                (
+                    "Wiki prototype -> one implementation -> evaluator -> " if economy else
+                    f"{fast_trial_count} reviewed plan -> implementation -> evaluator trials -> "
+                )
                 + ("best-candidate promotion" if promoted else "no promotion")
             ),
         }
@@ -521,6 +526,8 @@ class LongHorizonCampaign:
     worktree_root: Path | None = None
 
     def __post_init__(self) -> None:
+        if self.base_campaign.optimization_mode == "economy":
+            self.fast_trials = 1
         if self.fast_episodes < 0:
             raise ValueError("fast_episodes must be non-negative")
         if self.fast_trials < 1:
@@ -537,6 +544,8 @@ class LongHorizonCampaign:
     def _episode_mode(
         self, state: SupervisorState, active: dict[str, Any] | None = None
     ) -> str:
+        if self.base_campaign.optimization_mode == "economy":
+            return "fast"
         if active is not None:
             # Never widen an in-flight episode, including legacy state without a mode.
             if active.get("mode") in {"fast", "full", "goal"}:
@@ -553,6 +562,8 @@ class LongHorizonCampaign:
         self, active: dict[str, Any], *, episode_mode: str
     ) -> int:
         """Keep an in-flight fast episode's original trial contract across restarts."""
+        if self.base_campaign.optimization_mode == "economy":
+            return 1
         value = active.get("fast_trials")
         if (
             episode_mode == "fast"
@@ -563,8 +574,9 @@ class LongHorizonCampaign:
             return value
         return self.fast_trials
 
-    @staticmethod
-    def _episode_reasoning_effort(*, episode_mode: str) -> str:
+    def _episode_reasoning_effort(self, *, episode_mode: str) -> str:
+        if self.base_campaign.optimization_mode == "economy":
+            return "medium"
         return FAST_REASONING_EFFORT if episode_mode == "fast" else FULL_REASONING_EFFORT
 
     def _expected_shape_ids(self) -> set[str] | None:
@@ -719,10 +731,13 @@ class LongHorizonCampaign:
             f"`plans/v{version}_trial{trial}_plan.md`"
             for trial in range(1, fast_trial_count + 1)
         )
+        prompt_path = (
+            ECONOMY_PROMPT_PATH
+            if self.base_campaign.optimization_mode == "economy"
+            else (FAST_PROMPT_PATH if episode_mode == "fast" else PROMPT_PATH)
+        )
         return _render(
-            (FAST_PROMPT_PATH if episode_mode == "fast" else PROMPT_PATH).read_text(
-                encoding="utf-8"
-            ),
+            prompt_path.read_text(encoding="utf-8"),
             {
                 "EPISODE_MODE": episode_mode,
                 "EPISODE": episode,
@@ -1036,7 +1051,8 @@ class LongHorizonCampaign:
             },
             "optimization": {
                 "action_category": (
-                    "fast_long_horizon_episode" if episode_mode == "fast" else "long_horizon_episode"
+                    "economy_long_horizon_episode" if self.base_campaign.optimization_mode == "economy"
+                    else "fast_long_horizon_episode" if episode_mode == "fast" else "long_horizon_episode"
                 ),
                 "action_description": str(
                     outcome.get("summary", "verified long-horizon candidate")
@@ -1062,6 +1078,7 @@ class LongHorizonCampaign:
                 ),
                 promoted=True,
                 episode_workspace=episode_workspace,
+                optimization_mode=self.base_campaign.optimization_mode,
             ),
             "experience": _memory_experience(journal),
             "correctness": {
@@ -1249,7 +1266,8 @@ class LongHorizonCampaign:
             },
             "optimization": {
                 "action_category": (
-                    "fast_long_horizon_episode" if episode_mode == "fast" else "long_horizon_episode"
+                    "economy_long_horizon_episode" if self.base_campaign.optimization_mode == "economy"
+                    else "fast_long_horizon_episode" if episode_mode == "fast" else "long_horizon_episode"
                 ),
                 "action_description": str(outcome.get("summary", status)),
                 "expected_impact": "episode exploration did not produce a promotable improvement",
@@ -1268,6 +1286,7 @@ class LongHorizonCampaign:
                 ),
                 promoted=False,
                 episode_workspace=episode_workspace,
+                optimization_mode=self.base_campaign.optimization_mode,
             ),
             "experience": _memory_experience(journal),
             "correctness": {

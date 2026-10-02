@@ -79,6 +79,7 @@ from .operator_layout import (
     validate_private_shapes,
 )
 from .optimization_policy import (
+    candidate_structure_violations,
     install_workspace_policy,
     optimization_mode_directive,
     production_kernel_violations,
@@ -168,16 +169,16 @@ class Campaign:
     name: str
     kernel_demo: str
     platform: str
-    framework: str
+    framework: str = ""
     notes: str = "none"
     arch: str = ""  # real runtime GPU arch e.g. "sm_103" / "gfx942"; auto-detected
     work_dir: str = ""  # explicit working directory; "" = Path.cwd() (backward compat)
     workspace_suffix: str = ""  # internal auto-dispatch suffix, e.g. triton_h20
-    max_iters: int = 20
+    max_iters: int | None = None
     token_budget: int = 0  # 0 = no token cap (max-iters still bounds the run)
     target_util: float = 90.0
     setup_timeout: int = 7200  # 120 min for the baseline session
-    max_stall: int = 0  # 0 = disabled; >0 = stop after N unpromoted episodes
+    max_stall: int | None = None  # economy defaults to 2; other modes to 0
     fast_episodes: int = DEFAULT_FAST_EPISODES  # first N post-baseline episodes
     fast_trials: int = DEFAULT_FAST_TRIALS  # trials per fast episode
     convert_after: int = (
@@ -192,10 +193,10 @@ class Campaign:
     atrex_bench_root: str = ""  # native evaluator checkout owning run_eval.py
     agent_cli: str = "claude"  # episode backend: claude, qodercli, codex, or pi
     optimization_mode: str = (
-        "leaderboard"  # permissive contest flow or strict production gate
+        "leaderboard"  # leaderboard, production, or Wiki-first economy
     )
     framework_baseline: str = (
-        "auto"  # auto = production only; always | never override it
+        "auto"  # auto = production/economy; always | never override it
     )
     framework_baseline_timeout: int = FRAMEWORK_BASELINE_TIMEOUT_S
     handoff_resumes: int = DEFAULT_HANDOFF_RESUMES
@@ -226,6 +227,22 @@ class Campaign:
     )
 
     def __post_init__(self) -> None:
+        economy = self.optimization_mode == "economy"
+        if self.max_iters is None:
+            self.max_iters = 10 if economy else 20
+        if self.max_stall is None:
+            self.max_stall = 2 if economy else 0
+        if economy:
+            if self.framework or self.framework_baseline == "never":
+                raise ValueError("economy requires a Wiki-selected framework and correctness-first baseline")
+            if not any(
+                plugin.id == "gpu-wiki" and "query" in plugin.tools
+                for plugin in self.plugin_registry.plugins
+            ):
+                raise RuntimeError("economy mode requires the gpu-wiki.query plugin")
+            self.fast_episodes = self.max_iters
+            self.fast_trials = 1
+            self.convert_after = 0
         self.plugin_registry.check_lock(self.workspace)
         if sum(
             bool(value)
@@ -374,15 +391,25 @@ class Campaign:
     def plugin_directive(self, phase: str) -> str:
         registry = self.plugin_registry
         registry.check_lock(self.workspace)
+        if self.optimization_mode == "economy":
+            phase = {
+                "framework_baseline": "economy_baseline",
+                "fast_episode": "economy_episode",
+                "episode": "economy_episode",
+            }.get(phase, phase)
         return registry.instructions(
             phase,
             PLATFORM=self.platform,
-            ARCH=self.arch or "<exact runtime architecture>",
+            ARCH=self.arch or (
+                "unknown" if self.optimization_mode == "economy" else "<exact runtime architecture>"
+            ),
             FRAMEWORK=self.framework,
             OPERATOR=self.name,
         )
 
     def _episode_plan_reviewers(self, episode_mode: str) -> tuple[str, ...]:
+        if self.optimization_mode == "economy":
+            return ()
         if episode_mode == "goal":
             episode_mode = "full"
         if episode_mode not in ("fast", "full"):
@@ -394,6 +421,8 @@ class Campaign:
         )
 
     def _framework_baseline_correctness_reviewers(self) -> tuple[str, ...]:
+        if self.optimization_mode == "economy":
+            return ()
         return tuple(
             reviewer
             for reviewer, enabled in (
@@ -1608,12 +1637,14 @@ class Campaign:
         if not progressed and dirty_candidate:
             return "run", "resuming preserved framework-baseline work"
 
-        if self.framework_baseline == "auto" and self.optimization_mode != "production":
+        if self.framework_baseline == "auto" and self.optimization_mode == "leaderboard":
             return (
                 "skip",
                 "leaderboard mode keeps the permissive V0 (use --framework-baseline always)",
             )
         if not progressed:
+            if self.optimization_mode == "economy":
+                return "run", "adapt a Wiki prototype and establish full-workload correctness first"
             structural = production_structure_violations(
                 self.workspace, self.framework
             )
@@ -2395,7 +2426,7 @@ class Campaign:
                 sandbox_ssh_init=self.sandbox_ssh_init,
                 sandbox_health_command=self.sandbox_health_command,
                 sandbox_timeout=self.sandbox_timeout,
-                reasoning_effort="max",
+                reasoning_effort="medium" if self.optimization_mode == "economy" else "max",
                 extra_environment=self.agent_environment(),
             )
         except EnvironmentUnavailable:
@@ -2621,11 +2652,16 @@ class Campaign:
     def _framework_baseline_prompt(self, n: int) -> str:
         smoke_command, smoke_scope = self._framework_baseline_smoke_command(n)
         return _render(
-            PROMPTS_DIR / "framework_baseline.md",
+            PROMPTS_DIR / (
+                "economy_baseline.md"
+                if self.optimization_mode == "economy"
+                else "framework_baseline.md"
+            ),
             PLUGINS=self.plugin_directive("framework_baseline"),
             WORKSPACE=str(self.workspace),
             N=n,
             PREV=n - 1,
+            OPERATOR=self.name,
             PLATFORM=self.platform,
             FRAMEWORK=self.framework,
             ARCH=self.arch or "the runtime GPU arch",
@@ -2681,11 +2717,16 @@ class Campaign:
         candidate_blob = git_worktree_blob(self.workspace, "kernel.py")
         if not candidate_blob or candidate_blob == v0_blob:
             return "the session left the V0 kernel unchanged; no framework implementation was produced"
-        violations = (
-            self._production_kernel_violations()
-            if include_policy_review
-            else production_structure_violations(self.workspace, self.framework)
-        )
+        if self.optimization_mode == "economy":
+            violations = candidate_structure_violations(self.workspace)
+            if not (self.workspace / "plans/v1_economy_prototype.md").is_file():
+                return "the Wiki prototype summary plans/v1_economy_prototype.md is missing"
+        else:
+            violations = (
+                self._production_kernel_violations()
+                if include_policy_review
+                else production_structure_violations(self.workspace, self.framework)
+            )
         if violations:
             return (
                 f"the candidate is not a self-contained {self.framework} implementation: "
@@ -2711,6 +2752,8 @@ class Campaign:
         self, n: int
     ) -> tuple[Optional[dict], str]:
         """Run policy review and the sole authoritative V1 evaluator concurrently."""
+        if self.optimization_mode == "economy":
+            return self._validate_framework_baseline(n)
         print(
             "[orchestrator] framework baseline: running policy review and combined "
             "correctness/performance validation in parallel",

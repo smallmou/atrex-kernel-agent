@@ -35,7 +35,7 @@ AKA supports:
 - gateway and Bubblewrap-isolated OpenSSH GPU execution, with automatic environment recovery;
 - Triton, CuteDSL, CUDA, FlyDSL, and TileLang campaigns;
 - Claude, Qoder, Codex, and Pi coding-agent backends;
-- leaderboard and fail-closed production modes;
+- leaderboard, fail-closed production, and Wiki-first economy modes;
 - automatic local plugins and structured GPU Wiki retrieval with traceable attribution;
 - production-mode numerical probes and mode-specific performance verification;
 - resumable, Git-isolated optimization with canonical measurement history.
@@ -61,6 +61,11 @@ launch an AKA optimization task. We recommend the following prompt:
 Use AKA's orchestrator/optimize.py to start one optimization task for atrex-bench/xx. Put the workspace under ~/aka-opt, set the platform to H20, use the local sandbox, use claude as the Agent CLI, set max-iters to 300, specify cuda as the framework, and run in production mode.
 ```
 
+For a lower-cost option, use `--optimization-mode economy` and omit `--framework`. AKA adapts
+the closest compatible Wiki prototype, establishes correctness first, then runs compact
+single-candidate optimization episodes. Economy defaults to `--max-iters 10` and reuses saved
+knowledge across episodes. See [Economy mode](docs/quickstart.md#economy-mode).
+
 ## Documentation
 
 | Document | Contents |
@@ -74,7 +79,8 @@ Use AKA's orchestrator/optimize.py to start one optimization task for atrex-benc
 Run `python orchestrator/optimize.py --help` for the authoritative CLI interface and defaults.
 
 For a GPU server reachable through OpenSSH, use a dedicated low-privilege account and pass
-`--sandbox-ssh user@gpu-host --sandbox-ssh-gpu 0` with an explicit `--framework`. AKA keeps Agent,
+`--sandbox-ssh user@gpu-host --sandbox-ssh-gpu 0` with an explicit `--framework` or
+`--optimization-mode economy`. AKA keeps Agent,
 Git, memory, and episode state local, transfers only
 the sandbox allowlist to a fresh remote temporary directory, and runs it in a mandatory networkless
 Bubblewrap namespace before copying back requested artifacts. Use `--sandbox-ssh-runtime-bind` for

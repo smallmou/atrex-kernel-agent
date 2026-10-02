@@ -52,7 +52,7 @@ promotion; it is not a second CLI.
 │   ├── constants.py                   # Shared paths, policy defaults, state filenames
 │   ├── agent_runtime/                 # Claude/Qoder/Codex/Pi adapters and process policy
 │   ├── telemetry/                     # Phase timing and token telemetry
-│   ├── optimization_policy.py         # leaderboard/production policy gates
+│   ├── optimization_policy.py         # leaderboard/production/economy policies
 │   └── prompts/                       # Setup, inspection, baseline, and episode prompts
 ├── long_horizon/                      # Episode worktrees, handoff protocol, ABBA verification
 ├── agents/                            # Baseline Agent definition injected into campaign workspaces

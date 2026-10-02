@@ -21,7 +21,9 @@
     "setup": "setup.md",
     "episode": "episode.md",
     "fast_episode": "episode.md",
-    "framework_baseline": "framework_baseline.md"
+    "framework_baseline": "framework_baseline.md",
+    "economy_baseline": "economy_baseline.md",
+    "economy_episode": "economy_episode.md"
   },
   "environment": {
     "ATREX_WIKI_PROFILE_ROOT": "{workspace}/.gpu_wiki_profile",

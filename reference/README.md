@@ -10,7 +10,7 @@ workspace template.
 - runtime architecture: `<sm_90 / sm_100 / gfx942 / gfx950 / ...>` probed through the sandbox or
   supplied by `--arch`
 - framework: `<Triton / CuteDSL / Cuda / FlyDSL / ...>` selected per campaign
-- optimization mode: `leaderboard` or `production`
+- optimization mode: `leaderboard`, `production`, or Wiki-first `economy`
 - operator and dtype: derived from immutable files under `--op-dir`
 
 ## Execution Boundary
