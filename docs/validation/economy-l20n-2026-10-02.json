@@ -1,0 +1,361 @@
+{
+  "recorded_at": "2026-10-02T13:37:54.093364+00:00",
+  "branch": "codex/economy-mode",
+  "commit": "02004c9fa1a1eb0fc768c8d1bcdb910bd25b273c",
+  "main_base": "3d27c1eb1d75f390df29e63aa93ddbeecd928e3f",
+  "agent_cli": "claude",
+  "configured_model": "qwen3.8-max-0902",
+  "environment": {
+    "gpu": "L20N",
+    "vendor": "nvidia",
+    "gpu_model": "NVIDIA L20N",
+    "aliases": [
+      "L20N",
+      "l20n",
+      "RTX-PRO-5000"
+    ],
+    "arch": "sm_120",
+    "sm_count": 110,
+    "total_memory_mb": 72830,
+    "driver_version": "580.126.09",
+    "toolchain": {
+      "torch": "2.9.0+cu130",
+      "cuda": "13.0",
+      "triton": "3.7.1",
+      "gluon": "3.7.1",
+      "cutedsl": "4.6.1",
+      "tilelang": "0.1.13",
+      "nvcc": "13.3.73",
+      "ptxas": "13.3.73"
+    },
+    "source": "cache",
+    "probed_at": "2026-10-02T11:29:20.495223+00:00",
+    "probe_error": null
+  },
+  "operator_dir": "/Users/liangyan/Agent/atrex-bench/data/production_qwen37max_prefill_unici/gdn_qk_l2_norm",
+  "operator_fingerprints": {
+    "metadata.json": "c7feea74c7f331d55ef56be6686cbd201bef571e03a9f897d028d8ccf9b6ec47",
+    "shapes.json": "4d7375fbfb96e2cde8eb293924bf3b0320bfcc12d4388d3e23d1f0c59e63fb32",
+    "input.py": "28a00a97011ac9a788306df5d7f4d73af8b5cd6e5ad725f61c456b1b32d9e701",
+    "reference.py": "b8d9553f4928638b9cd8d8a59d75a0f8ccfca9be886db91764dce08d02e238e7"
+  },
+  "local_checks": {
+    "mode_and_journal_unit_tests": {
+      "passed": 15
+    },
+    "wiki_unit_tests": {
+      "passed": 122,
+      "skipped": 8
+    },
+    "main_policy_and_structure_comparisons": {
+      "passed": 168
+    },
+    "default_max_iters": {
+      "economy": 10,
+      "leaderboard": 20,
+      "production": 20
+    },
+    "default_fast_trials": {
+      "economy": 1,
+      "leaderboard": 5,
+      "production": 5
+    }
+  },
+  "evaluation_route": "local agate dev executes the original Atrex-Bench SDK and immutable operator inputs on remote L20N",
+  "economy_context_comparison": {
+    "scope": "same operator, provider configuration and V1 bring-up; one run per variant; counts include cached input tokens",
+    "before_compact_policy_tokens": 1651168,
+    "after_compact_policy_tokens": 1131255,
+    "reduction_fraction": 0.3148758939126727,
+    "episode": {
+      "before_compact_policy_tokens": 2150779,
+      "after_compact_policy_tokens": 1032167,
+      "reduction_fraction": 0.520096207002207
+    }
+  },
+  "schema_version": 1,
+  "scope": "One real operator, two workloads, Claude CLI only. Bounded smoke runs exercise baseline bring-up and one optimization episode; the default 10-version cap is covered by unit tests.",
+  "tool_versions": {
+    "agate_client": "0.13.9",
+    "agate_server": "0.13.21",
+    "claude_cli": "2.1.170"
+  },
+  "direct_eval_compatibility": {
+    "supported": false,
+    "reason": "gateway source validation rejects the original input.py getattr; inputs were not rewritten"
+  },
+  "modes": {
+    "economy": {
+      "exit_code": 0,
+      "smoke_configuration": {
+        "max_iters": 2,
+        "fast_trials": 1,
+        "max_stall": 0,
+        "framework": null
+      },
+      "autoloaded_policy_bytes": 1087,
+      "supervisor": {
+        "episodes": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "blocked": 0,
+        "protocol_failures": 0,
+        "tokens": 1032167
+      },
+      "candidate_sha256": "c616bfceb8dcb98e6df8d664e2774d164bbff4dd273972216f52ce8a597aa83b",
+      "versions": {
+        "v0": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 120.00312150028454,
+          "performance_score": 0.15795145931379523,
+          "measured_shape_count": 2
+        },
+        "v1": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 28.1553452866342,
+          "performance_score": 0.6981206192775565,
+          "measured_shape_count": 2,
+          "validated_stages": [
+            "combined-base-performance+multi-seed-5"
+          ]
+        },
+        "v2": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 27.40179209532786,
+          "performance_score": 0.7453918989976628,
+          "measured_shape_count": 2
+        }
+      },
+      "episode": {
+        "status": "candidate_ready",
+        "version": 2,
+        "verification_gate": "PASS",
+        "improvement_pct": 6.771219530662842,
+        "evaluation_ids": [
+          "20261002T124136Z-2f8df93a"
+        ]
+      },
+      "baseline_agent_tokens": [
+        1131255
+      ],
+      "gateway_jobs": [
+        {
+          "job_id": "dv_ae4aee8f5cfd",
+          "kind": "dev",
+          "status": "succeeded",
+          "command_ok": true,
+          "gpu": "NVIDIA L20N"
+        },
+        {
+          "job_id": "dv_4843eb5d1940",
+          "kind": "dev",
+          "status": "succeeded",
+          "command_ok": true,
+          "gpu": "NVIDIA L20N"
+        },
+        {
+          "job_id": "dv_8f2fbc517161",
+          "kind": "dev",
+          "status": "succeeded",
+          "command_ok": true,
+          "gpu": "NVIDIA L20N"
+        }
+      ]
+    },
+    "leaderboard": {
+      "exit_code": 0,
+      "smoke_configuration": {
+        "max_iters": 1,
+        "fast_trials": 1,
+        "max_stall": 0,
+        "framework": "Triton"
+      },
+      "autoloaded_policy_bytes": 13714,
+      "supervisor": {
+        "episodes": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "blocked": 0,
+        "protocol_failures": 0,
+        "tokens": 3591023
+      },
+      "candidate_sha256": "6ed735ee6c63a9e00a27ec314cfcaeb83311419cb98170aa30f7d6bd45dde1f0",
+      "versions": {
+        "v0": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 119.54447839784143,
+          "performance_score": 0.1584036599335758,
+          "measured_shape_count": 2
+        },
+        "v1": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 29.17950898993883,
+          "performance_score": 0.6854739439874693,
+          "measured_shape_count": 2
+        }
+      },
+      "episode": {
+        "status": "candidate_ready",
+        "version": 1,
+        "verification_gate": "PASS",
+        "improvement_pct": 332.7387033070527,
+        "evaluation_ids": [
+          "20261002T124643Z-511e616b"
+        ]
+      },
+      "baseline_agent_tokens": [],
+      "gateway_jobs": [
+        {
+          "job_id": "dv_526c555eb598",
+          "kind": "dev",
+          "status": "succeeded",
+          "command_ok": true,
+          "gpu": "NVIDIA L20N"
+        }
+      ]
+    },
+    "production": {
+      "exit_code": 0,
+      "smoke_configuration": {
+        "max_iters": 2,
+        "fast_trials": 1,
+        "max_stall": 0,
+        "framework": "Triton"
+      },
+      "autoloaded_policy_bytes": 15818,
+      "supervisor": {
+        "episodes": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "blocked": 0,
+        "protocol_failures": 0,
+        "tokens": 3225941
+      },
+      "candidate_sha256": "f8b007848ee99caf379ee9eb8edc5deaef6ca980b66d125c5b75308d09a153b9",
+      "versions": {
+        "v0": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 149.18399405122716,
+          "performance_score": 0.12572983852605393,
+          "measured_shape_count": 2
+        },
+        "v1": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 26.97977726890086,
+          "performance_score": 0.7728325656586075,
+          "measured_shape_count": 2,
+          "validated_stages": [
+            "combined-base-performance+multi-seed-5"
+          ]
+        },
+        "v2": {
+          "correctness": "PASS",
+          "quality_gate": "PASS",
+          "latency_us_geomean": 26.451441110142223,
+          "performance_score": 0.8075222190306736,
+          "measured_shape_count": 2
+        }
+      },
+      "episode": {
+        "status": "candidate_ready",
+        "version": 2,
+        "verification_gate": "PASS",
+        "improvement_pct": 4.488637631684633,
+        "evaluation_ids": [
+          "20261002T131117Z-c1c3867e"
+        ]
+      },
+      "baseline_agent_tokens": [
+        1328353
+      ],
+      "production_policy_reviews": [
+        {
+          "candidate_digest": "bff56f3276e200ff38db395b0c0e7ce7091d4af887b167383866ad74529da9ac",
+          "framework": "Triton",
+          "required_phase": "selected_framework",
+          "accepted": true,
+          "errors": []
+        },
+        {
+          "candidate_digest": "866ab7d71125a22766fc5baca85e53a4a64d4444adc12298280d6083fc74b56b",
+          "framework": "Triton",
+          "required_phase": "selected_framework",
+          "accepted": true,
+          "errors": []
+        }
+      ],
+      "numerical_supplement": {
+        "v1": {
+          "status": "skipped_planner_timeout",
+          "standard_correctness_passed": true,
+          "diagnosis": "numerical supplemental-test planner timed out without a usable plan"
+        },
+        "v2": {
+          "status": "passed",
+          "seeds": [
+            1729,
+            104729
+          ],
+          "probes": [
+            {
+              "case_id": "eps_dominated_tiny_norm_rows",
+              "status": "passed",
+              "expected_probes": 4,
+              "observed_probes": 4,
+              "failed_probes": 0
+            },
+            {
+              "case_id": "all_zero_rows_sparse_eps_guard",
+              "status": "passed",
+              "expected_probes": 4,
+              "observed_probes": 4,
+              "failed_probes": 0
+            },
+            {
+              "case_id": "large_magnitude_f32_ssq_range",
+              "status": "passed",
+              "expected_probes": 4,
+              "observed_probes": 4,
+              "failed_probes": 0
+            }
+          ]
+        }
+      }
+    }
+  },
+  "economy_final_multi_seed": {
+    "version": 2,
+    "command": "python3 tools/sandbox.py --kind run --hardware L20N --no-sync -- python test_kernel.py --version v2 --multi-seed 5 --no-memory",
+    "exit_code": 0,
+    "shape_count": 2,
+    "correctness_cases_per_shape": 6,
+    "gateway_job": {
+      "job_id": "dv_8f2fbc517161",
+      "kind": "dev",
+      "status": "succeeded",
+      "command_ok": true
+    },
+    "actual_gpu": "NVIDIA L20N",
+    "all_pass": true,
+    "eval_id": "20261002T124714Z-903a07a2",
+    "numerical_metrics": {
+      "relative_l2": 1.618716071565685e-05,
+      "max_elementwise_abs_diff": 0.001953125,
+      "max_elementwise_rel_diff": 0.007751937984496124
+    },
+    "scope": "correctness only; no performance timing from this additional run"
+  },
+  "economy_prototype": {
+    "wiki_id": "gpu_wiki::nvidia.blackwell-geforce.triton.ref-docs.sm120-fused-rmsnorm-gated-bf16-optimization",
+    "framework": "Triton",
+    "queries": 2,
+    "adaptation": "Referenced source was unavailable; adapted the returned sm_120 bf16 normalization recipe, replacing RMS mean/weight/gating with L2 sum of squares and eps=1e-6 for q and k."
+  }
+}
