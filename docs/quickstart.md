@@ -345,6 +345,8 @@ seeds; its performance may initially be worse than V0. The selected prototype, e
 IDs and adaptations are saved in a short committed summary for reuse after restarts and in later
 episodes. If no usable prototype or recipe is available after one focused follow-up, the campaign
 reports the coverage/tooling blocker.
+Economy workspaces use a compact `CLAUDE.md` policy so the full optimization workflow does not
+inflate every session's context.
 
 The default `--max-iters` is **10**, including V1; override it explicitly for a different cap.
 Each later episode uses medium reasoning effort, one small implementation change and one

@@ -80,7 +80,9 @@ def optimization_mode_directive(mode: str, framework: str) -> str:
             "Wiki results, and avoid repeated queries, broad research, profiling, planning agents "
             "and external reviews. The active economy prompt owns validation and handoff. "
             "Never change evaluator inputs, tolerances or timing; never cache input values or "
-            "outputs. Keep executable candidate code in kernel.py and its manifest accurate.\n"
+            "outputs. Keep executable candidate code in kernel.py and its manifest accurate. "
+            "Run all GPU imports, compilation and evaluation through the remote sandbox command "
+            "in the active prompt; never run GPU code on the host or install dependencies.\n"
         )
     if mode == "leaderboard":
         return (
@@ -210,7 +212,9 @@ def install_workspace_policy(
     claude_path = workspace / "CLAUDE.md"
     current = claude_path.read_text(encoding="utf-8") if claude_path.exists() else ""
     generated = workspace_policy_block(mode, framework)
-    if POLICY_BEGIN in current and POLICY_END in current:
+    if mode == "economy":
+        current = generated
+    elif POLICY_BEGIN in current and POLICY_END in current:
         before, remainder = current.split(POLICY_BEGIN, 1)
         _, after = remainder.split(POLICY_END, 1)
         current = before.rstrip() + "\n\n" + generated + after.lstrip("\n")
@@ -277,7 +281,9 @@ def _solution_structure_violations(workspace: Path) -> list[str]:
     return []
 
 
-def candidate_structure_violations(workspace: Path) -> list[str]:
+def candidate_structure_violations(
+    workspace: Path, *, require_gluon: bool = False,
+) -> list[str]:
     """Check that Python candidate sources can be versioned and embedded."""
     kernel_path = workspace / "kernel.py"
     if not kernel_path.is_file():
@@ -291,6 +297,8 @@ def candidate_structure_violations(workspace: Path) -> list[str]:
     errors: list[str] = []
     if _has_relative_import(tree):
         errors.append("relative/local-module imports are not self-contained")
+    if require_gluon and not source_uses_gluon(source):
+        errors.append("switching back from the accepted Gluon phase to Triton is forbidden")
     errors.extend(_solution_structure_violations(workspace))
     return list(dict.fromkeys(errors))
 
@@ -304,13 +312,7 @@ def production_structure_violations(
     """Check structure locally; the independent reviewer judges compute provenance."""
     if _framework_key(framework) not in _SUPPORTED_PRODUCTION_FRAMEWORKS:
         return [f"unsupported production framework: {framework}"]
-    errors = candidate_structure_violations(workspace)
-    kernel_path = workspace / "kernel.py"
-    if require_gluon and kernel_path.is_file() and not source_uses_gluon(
-        kernel_path.read_text(encoding="utf-8", errors="replace")
-    ):
-        errors.append("switching back from the accepted Gluon phase to Triton is forbidden")
-    return list(dict.fromkeys(errors))
+    return candidate_structure_violations(workspace, require_gluon=require_gluon)
 
 
 def production_kernel_violations(

@@ -17,7 +17,12 @@ from orchestrator import optimize
 from orchestrator.campaign import Campaign
 from orchestrator.constants import TEST_RESULT_PREFIX
 from orchestrator.hardware import framework_workspace_suffix
-from orchestrator.optimization_policy import install_workspace_policy
+from orchestrator.optimization_policy import (
+    candidate_structure_violations,
+    install_workspace_policy,
+    production_kernel_violations,
+    production_structure_violations,
+)
 
 
 class EconomyModeTest(unittest.TestCase):
@@ -66,11 +71,44 @@ class EconomyModeTest(unittest.TestCase):
         self.assertEqual(engine._episode_reasoning_effort(episode_mode="fast"), "medium")
 
     def test_existing_mode_defaults_and_episode_escalation(self) -> None:
-        campaign = self.campaign(optimization_mode="leaderboard", framework="Triton")
-        self.assertEqual((campaign.max_iters, campaign.max_stall, campaign.fast_trials), (20, 0, 5))
-        engine = LongHorizonCampaign(base_campaign=campaign)
-        self.assertEqual(engine._episode_mode(SupervisorState(episodes=2)), "full")
-        self.assertEqual(engine._episode_reasoning_effort(episode_mode="full"), "max")
+        for mode in ("leaderboard", "production"):
+            with self.subTest(mode=mode):
+                campaign = self.campaign(optimization_mode=mode, framework="Triton")
+                self.assertEqual((campaign.max_iters, campaign.max_stall, campaign.fast_trials), (20, 0, 5))
+                engine = LongHorizonCampaign(base_campaign=campaign)
+                self.assertEqual(engine._episode_mode(SupervisorState(episodes=2)), "full")
+                self.assertEqual(engine._episode_reasoning_effort(episode_mode="full"), "max")
+
+    def test_production_structure_preserves_errors_and_gluon_phase_gate(self) -> None:
+        kernel = self.root / "kernel.py"
+        kernel.write_text("def broken(:\n")
+        self.assertEqual(
+            production_structure_violations(self.root, "Triton", require_gluon=True),
+            ["kernel.py is not valid Python: invalid syntax (line 1)"],
+        )
+        kernel.write_text("from .helper import launch\n")
+        (self.root / "solution.json").write_text(json.dumps({"sources": [{"path": "helper.py"}]}))
+        errors = production_structure_violations(self.root, "Triton", require_gluon=True)
+        self.assertEqual(errors[:2], [
+            "relative/local-module imports are not self-contained",
+            "switching back from the accepted Gluon phase to Triton is forbidden",
+        ])
+        self.assertIn("helper.py", errors[2])
+        self.assertEqual(candidate_structure_violations(self.root), [errors[0], errors[2]])
+        (self.root / "solution.json").unlink()
+        kernel.write_text("from triton.experimental import gluon\n")
+        self.assertEqual(production_structure_violations(self.root, "Triton", require_gluon=True), [])
+
+    def test_production_still_requires_independent_policy_verdict(self) -> None:
+        (self.root / "kernel.py").write_text("import triton\n")
+        self.assertEqual(production_kernel_violations(self.root, "Triton"), [
+            "production candidate requires supervisor policy review",
+        ])
+        reviewer = MagicMock(return_value=["prebuilt compute is forbidden"])
+        self.assertEqual(production_kernel_violations(
+            self.root, "Triton", production_reviewer=reviewer,
+        ), ["prebuilt compute is forbidden"])
+        reviewer.assert_called_once_with(self.root, "Triton", False)
 
     def test_correctness_first_baseline_runs_once_and_resume_skips_pin(self) -> None:
         campaign = self.campaign()
@@ -139,10 +177,19 @@ class EconomyModeTest(unittest.TestCase):
 
     def test_workspace_policy_is_isolated_from_other_modes(self) -> None:
         self.assertEqual(framework_workspace_suffix("", "H20", "economy"), "economy_h20")
+        (self.root / "CLAUDE.md").write_text("Historical full optimization workflow\n")
         install_workspace_policy(self.root, "economy", "")
-        self.assertIn("Optimization mode: economy", (self.root / "CLAUDE.md").read_text())
+        instructions = (self.root / "CLAUDE.md").read_text()
+        self.assertIn("Optimization mode: economy", instructions)
+        self.assertNotIn("Historical full optimization workflow", instructions)
         with self.assertRaisesRegex(RuntimeError, "policy mismatch"):
             install_workspace_policy(self.root, "production", "Triton")
+        for mode in ("leaderboard", "production"):
+            workspace = self.root / mode
+            workspace.mkdir()
+            (workspace / "CLAUDE.md").write_text("Existing workflow\n")
+            install_workspace_policy(workspace, mode, "Triton")
+            self.assertTrue((workspace / "CLAUDE.md").read_text().startswith("Existing workflow"))
 
     def test_supervisor_stops_on_stall_iteration_and_token_budgets(self) -> None:
         cases = [(10, 2, 0, 2, "stall:"), (3, 0, 0, 3, "budget: max-iters"),

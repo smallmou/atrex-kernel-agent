@@ -25,7 +25,9 @@ the closest compatible prototype containing code or a concrete implementation re
 direct operator match over a component match, and supported hardware over a faster incompatible
 example. A labelled random sample is not a matching prototype. Inspect only the selected payload
 and at most one directly referenced local source file; do not browse sibling records or projects.
-Never execute retrieved source on the host.
+Do not search the repository or reference projects for additional implementations. A missing
+referenced source file is unavailable: adapt the returned recipe directly, or use the one
+focused follow-up below. Never execute retrieved source on the host.
 
 Adapt its code into `kernel.py`; preserve reusable structure and change only the entry point,
 shape handling, layout or precision required by this contract. Keep CUDA source and its loader
