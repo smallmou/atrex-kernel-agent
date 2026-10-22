@@ -1064,6 +1064,12 @@ class LongHorizonCampaign:
                 ),
             )
             if policy_violations:
+                from aka.light.workflow.constants import SUPPLEMENTAL_PENDING_PREFIX
+                if any(item.startswith(SUPPLEMENTAL_PENDING_PREFIX) for item in policy_violations):
+                    from aka.light.execution.retry import ValidationBlocked
+                    active.update(phase="validation_blocked", validation_error="; ".join(policy_violations))
+                    store.save_active(active)
+                    raise ValidationBlocked(active["validation_error"])
                 violation = (
                     "production policy rejected candidate: "
                     + "; ".join(policy_violations)
@@ -1411,6 +1417,10 @@ class LongHorizonCampaign:
         active = store.load_active()
         if active is None:
             return None
+        from .model_service import ModelServiceRecovery
+        ModelServiceRecovery(active, store.save_active).check_paused()
+        from .protocol_recovery import check_protocol_paused
+        check_protocol_paused(active)
         if active.get("mode") == "fast":
             raise RuntimeError(
                 "Cannot resume an unfinished Fast Episode with the unified workflow. "
@@ -1449,6 +1459,7 @@ class LongHorizonCampaign:
                 "verifying",
                 "promoting",
                 "recording",
+                "waiting_model_service",
             }
             and episode > 0
             and memory_version > 0
@@ -1498,7 +1509,8 @@ class LongHorizonCampaign:
             ):
                 return None
             active["resumed_from_phase"] = phase
-            active["phase"] = "exploring"
+            if phase != "waiting_model_service":
+                active["phase"] = "exploring"
             active["restart_count"] = int(active.get("restart_count", 0) or 0) + 1
             store.save_active(active)
             print(
@@ -1702,6 +1714,15 @@ class LongHorizonCampaign:
         return None
 
     def run(self) -> str:
+        from .model_service import ModelServiceRecovery
+        # Refuse automatic restarts before setup/GPU work can change the checkpoint.
+        if (self.workspace / RUNTIME_DIR / "active_episode.json").is_file():
+            initial_store = CampaignStore(self.workspace)
+            initial_active = initial_store.load_active()
+            if initial_active is not None:
+                ModelServiceRecovery(initial_active, initial_store.save_active).check_paused()
+                from .protocol_recovery import check_protocol_paused
+                check_protocol_paused(initial_active)
         main_adapter.prepare_campaign(self.base_campaign)
         store = CampaignStore(self.workspace)
         state = store.load_state()
@@ -1760,6 +1781,10 @@ class LongHorizonCampaign:
                 self.token_budget
                 and state.tokens >= self.token_budget
             ):
+                if recovered_episode is not None:
+                    recovery = ModelServiceRecovery(recovered_episode[1], store.save_active)
+                    if recovery.pending:
+                        recovery.pause("Episode token budget exhausted during model-service recovery")
                 if conversion_pending:
                     raise RuntimeError(
                         "mandatory Triton->Gluon conversion did not succeed before token-budget"
@@ -1886,11 +1911,16 @@ class LongHorizonCampaign:
                 remaining_token_budget=(
                     max(0, self.token_budget - state.tokens) if self.token_budget else None
                 ),
+                model_service_recovery=ModelServiceRecovery(active, store.save_active),
             )
             # Also persist before verification: a GPU outage there must not
             # discard the coding session's usage. Receipt replay is harmless.
             store.record_usage(state, usage_receipt, result.tokens)
             handoff = result.handoff
+            if handoff is None:
+                from .protocol_recovery import pause_protocol
+                pause_protocol(active, store.save_active,
+                    result.completion_diagnosis or "Session produced no valid terminal report; draft and budget preserved")
             status = handoff.status if handoff else "invalid_handoff"
             violation = ""
             candidate_commit = handoff.candidate_commit if handoff else ""
@@ -1972,4 +2002,19 @@ class LongHorizonCampaign:
             f"protocol_failures={state.protocol_failures} tokens={state.tokens}",
             flush=True,
         )
+        from aka.legacy.task.persistence import durable_write_json
+        from aka.light.workspace.state import resolve_framework_baseline_commit
+        _, framework_version = resolve_framework_baseline_commit(self.workspace)
+        # Search completion and candidate quality are independent facts.
+        durable_write_json(store.root / "outcome.json", {
+            "stop_reason": reason, "search_finished": reason != "episode-limit",
+            "budget_exhausted": reason.startswith("budget:") or reason == "max-episodes",
+            "has_verified_framework_candidate": framework_version >= 1 or state.accepted > 0,
+            "performance_improved": any(
+                attempt.get("accepted") and ((attempt.get("verification") or {}).get("improvement_pct") or 0) > 0
+                for attempt in state.attempts
+            ),
+            "accepted": state.accepted, "rejected": state.rejected,
+            "episodes": state.episodes, "protocol_failures": state.protocol_failures,
+        })
         return reason

@@ -103,6 +103,54 @@ def eval_retry_kind(job: object) -> str | None:
     return retry_kind(job)
 
 
+def candidate_failure(job: object, identity: dict) -> bool:
+    """A typed negative is actionable even when later ABBA runs were skipped.
+
+    Only inspect the requested candidate's evaluator stages; reference failures,
+    device availability and arbitrary stdout cannot establish a rejection.
+    """
+    if not isinstance(job, dict) or embedded_device_failure(job) or retry_kind(job):
+        return False
+    if job.get("status") == "failed":
+        error = job.get("error") or {}
+        return isinstance(error, dict) and error.get("error_class") in {
+            "candidate", "compilation", "correctness", "validation",
+        }
+    if job.get("status") != "succeeded" or job.get("error"):
+        return False
+    request = identity.get("request", identity.get("payload", {}))
+    shapes = (request.get("reference") or {}).get("shapes", {})
+    result = job.get("result")
+    if not shapes or not isinstance(result, dict):
+        return False
+
+    def negative(raw):
+        passed = raw.get("passed") or {}
+        if not isinstance(passed, dict):
+            return False
+        for stage in ("compile", "correctness"):
+            entries = passed.get(stage) or {}
+            if not isinstance(entries, dict):
+                continue
+            for sid in shapes:
+                entry = entries if stage == "compile" and "status" in entries else entries.get(sid, {})
+                if isinstance(entry, dict) and entry.get("status") == "failed":
+                    return True
+        return False
+
+    if not request.get("abba"):
+        return negative(result)
+    try:
+        for block in (result.get("abba") or {}).get("sdk_results", []):
+            for row in (block.get("abba") or {}).get("runs", []):
+                if row.get("revision") == "candidate" and isinstance(row.get("result"), dict):
+                    if negative(row["result"]):
+                        return True
+    except (TypeError, AttributeError):
+        return False  # Malformed evidence is incomplete, never a candidate verdict.
+    return False
+
+
 def cacheable_job(job: object, identity: dict | None = None) -> bool:
     if not isinstance(job, dict) or retry_kind(job) is not None or embedded_device_failure(job):
         return False

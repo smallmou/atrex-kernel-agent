@@ -384,6 +384,8 @@ class Campaign:
             workspace=self.workspace,
             request_timeout=request_timeout,
             queue_timeout=queue_timeout,
+            candidate_timeout_seconds=getattr(getattr(self, "module_options", None), "candidate_timeout_seconds", 120),
+            performance_timeout_seconds=getattr(getattr(self, "module_options", None), "performance_timeout_seconds", 120),
         ), workspace_provider=self.candidate_workspace)
         self._supervisor_runtime.numerical_validator = self.supplemental_numerical_feedback
 
@@ -689,6 +691,7 @@ class Campaign:
         errors: list[str]
         review_payload: object | None = None
         review_summary = ""
+        valid_verdict = False
         with tempfile.TemporaryDirectory(
             prefix="atrex-production-review-"
         ) as directory:
@@ -729,7 +732,8 @@ class Campaign:
                 self._account(result, "independent production policy review")
                 check_review_service(result)
             except ValueError as exc:
-                return [f"independent production policy review failed: {exc}"]
+                from aka.light.execution.retry import InvalidReview
+                raise InvalidReview(f"independent production policy review failed: {exc}") from exc
             changed = []
             for relative, expected_hash in source_hashes.items():
                 candidate_path = candidate_root / relative
@@ -765,6 +769,7 @@ class Campaign:
                         f"{type(exc).__name__}: {exc}"
                     ]
                 else:
+                    valid_verdict = True
                     status = "accepted" if not errors else "rejected"
                     print(
                         f"[production-policy] independent full-candidate review {status}: "
@@ -777,12 +782,14 @@ class Campaign:
                 workspace, framework, require_gluon
             )
         except OSError as exc:
+            valid_verdict = False
             errors = [
                 "production candidate changed during policy review: "
                 f"{type(exc).__name__}: {exc}"
             ]
         else:
             if reviewed_digest != candidate_digest:
+                valid_verdict = False
                 errors = ["production candidate changed during policy review"]
         review_record = {
             "schema_version": DEPENDENCY_REVIEW_SCHEMA_VERSION,
@@ -801,6 +808,9 @@ class Campaign:
             candidate_digest,
             review_record,
         )
+        if not valid_verdict or persistence_errors:
+            from aka.light.execution.retry import InvalidReview
+            raise InvalidReview("; ".join([*errors, *persistence_errors]))
         self._production_review_cache[cache_key] = (tuple(errors), review_record)
         return list(dict.fromkeys([*errors, *persistence_errors]))
 
@@ -811,20 +821,23 @@ class Campaign:
         require_gluon: bool,
     ) -> list[str]:
         """Bound timeout retries across sessions and supervisor restarts."""
-        from aka.light.execution.retry import retry_review
+        from aka.light.execution.retry import retry_review, retry_invalid_review, ValidationBlocked
 
         digest = _production_review_digest(workspace, framework, require_gluon)
         stage = f"dependency-review:{digest}:{self.agent_cli}:{self.production_review_timeout}"
         try:
             return retry_review(
                 self.workspace, stage,
-                lambda: self._review_production_candidate_once(
-                    workspace, framework, require_gluon, candidate_digest=digest,
+                lambda: retry_invalid_review(
+                    self.workspace, stage,
+                    lambda: self._review_production_candidate_once(
+                        workspace, framework, require_gluon, candidate_digest=digest,
+                    ), cancel=getattr(self, "search_cancel", None),
                 ),
                 cancel=getattr(self, "search_cancel", None),
             )
-        except ValueError as exc:
-            return [f"independent production policy review failed: {exc}"]
+        except (ValueError, ValidationBlocked) as exc:
+            return [f"{SUPPLEMENTAL_PENDING_PREFIX}: independent production review: {exc}"]
 
     def _production_kernel_violations(
         self,
@@ -1325,6 +1338,19 @@ class Campaign:
         if action == "run":
             self._link_runtime()
             self._restore_framework_baseline_candidate(v0_blob)
+            if git_worktree_blob(self.workspace, "kernel.py") != v0_blob:
+                # Validate a preserved candidate before spending another coding turn.
+                action = "adopt"
+
+        if action == "run":
+            from aka.light.execution.retry import baseline_repair_count
+            if baseline_repair_count(self.workspace, baseline_commit):
+                self._recover_framework_baseline(
+                    "the preserved work has no framework implementation", v0_blob, baseline_commit, pre_head
+                )
+                action = "adopt"
+
+        if action == "run":
             self._sync_framework_baseline_live(
                 phase="framework_baseline_correctness_review"
             )
@@ -1342,7 +1368,6 @@ class Campaign:
                     "the framework baseline Agent exited without usable output; "
                     f"inspect {framework_baseline_progress_path(self.workspace)}"
                 )
-            recovery_used = False
             problem = self._framework_baseline_problem(
                 v0_blob, baseline_commit, include_policy_review=False
             )
@@ -1350,13 +1375,11 @@ class Campaign:
                 self._recover_framework_baseline(
                     problem, v0_blob, baseline_commit, pre_head
                 )
-                recovery_used = True
                 self._warn_restored_baseline_paths(baseline_commit)
                 problem = self._framework_baseline_problem(
                     v0_blob, baseline_commit, include_policy_review=False
                 )
         else:  # adopt: our own interrupted run already committed the kernel
-            recovery_used = False
             self._sync_framework_baseline_live(phase="framework_baseline")
             self._warn_restored_baseline_paths(baseline_commit)
             problem = self._framework_baseline_problem(
@@ -1365,19 +1388,12 @@ class Campaign:
         result: Optional[dict] = None
         if not problem:
             result, problem = self._framework_baseline_external_gates(n)
-        numerical_repairs = 0
-        while problem and not problem.startswith(SUPPLEMENTAL_PENDING_PREFIX) and (
-            not recovery_used or (problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX) and numerical_repairs < 2)
-        ):
-            # The implementation Agent intentionally runs only a bounded smoke subset.
-            # Give one focused repair turn when the authoritative combined gate finds a
-            # full-domain or policy problem, then rerun the independent gates once.
-            if problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX):
-                numerical_repairs += 1
+        while problem and not problem.startswith(SUPPLEMENTAL_PENDING_PREFIX):
+            # The repair budget is persisted by _recover_framework_baseline.
+            # Missing reviewer evidence never starts another coding session.
             self._recover_framework_baseline(
                 problem, v0_blob, baseline_commit, pre_head
             )
-            recovery_used = True
             self._warn_restored_baseline_paths(baseline_commit)
             problem = self._framework_baseline_problem(
                 v0_blob, baseline_commit, include_policy_review=False
@@ -2352,7 +2368,7 @@ class Campaign:
                 violations = policy_future.result()
             except Exception as exc:
                 violations = [
-                    "independent production policy review failed: "
+                    f"{SUPPLEMENTAL_PENDING_PREFIX}: independent production policy review failed: "
                     f"{type(exc).__name__}: {exc}"
                 ]
             try:
@@ -2360,9 +2376,14 @@ class Campaign:
             except Exception as exc:
                 result, validation_problem = (
                     None,
-                    "combined validation failed: "
+                    f"{SUPPLEMENTAL_PENDING_PREFIX}: combined validation unavailable: "
                     f"{type(exc).__name__}: {exc}",
                 )
+        pending = [item for item in violations if item.startswith(SUPPLEMENTAL_PENDING_PREFIX)]
+        if pending:
+            return None, "; ".join(pending)
+        if validation_problem.startswith(SUPPLEMENTAL_PENDING_PREFIX):
+            return None, validation_problem
         if violations:
             return None, (
                 f"the candidate is not a self-contained {self.framework} implementation: "
@@ -2470,6 +2491,8 @@ class Campaign:
         self, problem: str, v0_blob: str, baseline_commit: str, pre_head: str
     ) -> None:
         """Run one recovery session; unexpected exits invoke the progress supervisor."""
+        from aka.light.execution.retry import reserve_baseline_repair
+        reserve_baseline_repair(self.workspace, baseline_commit)
         print(
             f"[orchestrator] WARNING: framework baseline rejected ({problem}); "
             "starting one recovery session",
@@ -2688,6 +2711,7 @@ class Campaign:
         engine = LongHorizonCampaign(
             base_campaign=self,
             max_version=self.max_iters,
+            episode_limit=getattr(getattr(self, "module_options", None), "episode_limit", 0),
             token_budget=self.token_budget,
             handoff_resumes=self.handoff_resumes,
             max_stall=self.max_stall,

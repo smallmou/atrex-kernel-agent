@@ -1,8 +1,8 @@
 """Turn numerical review suggestions into probes and coding-agent feedback.
 
 A reviewer requests bounded experiments, not an admission verdict. Only measured
-failures ask the coding agent to repair the candidate. Planner timeouts may skip
-additional testing after standard correctness passes; they are never probe passes.
+failures ask the coding agent to repair the candidate. Incomplete plans retry
+within a durable budget, then block validation while preserving the candidate.
 """
 from __future__ import annotations
 
@@ -30,7 +30,9 @@ from aka.light.agent.session_tail import read_regular_bytes
 from aka.light.acceptance.remote_numerical import MAX_REL_L2, PREFIX, validate_suite, validation_schedule
 from aka.light.workflow.constants import SUPPLEMENTAL_PENDING_PREFIX, SUPPLEMENTAL_REPAIR_PREFIX
 from aka.legacy.task.persistence import durable_write_json
-from aka.light.execution.retry import (check_review_service, retry_infrastructure)
+from aka.light.execution.retry import (
+    check_review_service, retry_infrastructure, retry_invalid_review, InvalidReview, ValidationBlocked,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = Path(__file__).resolve().parent / "remote_numerical.py"
@@ -42,7 +44,7 @@ PROMPT = ROOT / "workflow" / "prompts" / "numerical_review.md"
 HARNESS = native_harness_script().resolve(strict=True)
 
 
-class NumericalPlanningTimeout(RuntimeError):
+class NumericalPlanningTimeout(InvalidReview):
     """The numerical planner timed out without a usable plan."""
 
 
@@ -216,12 +218,15 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
             record_path = state_root / f"numerical_planning-{uuid.uuid4().hex}.json"
             durable_write_json(record_path, record, indent=2)
             if _digest({name: root / name for name in files}) != digest:
-                raise ValueError("numerical reviewer modified supplied evidence")
+                raise InvalidReview("numerical reviewer modified supplied evidence")
             # A timed-out CLI may already have written the requested plan before
             # hanging on its final response. Validate that artifact rather than
             # discarding it with the temporary session directory.
             if not result.timed_out:
-                check_review_service(result)
+                try:
+                    check_review_service(result)
+                except ValueError as exc:
+                    raise InvalidReview(str(exc)) from exc
             try:
                 value = json.loads(read_regular_bytes(response, limit=128 * 1024 + 1))
                 if response.stat().st_size > 128 * 1024:
@@ -237,7 +242,7 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
                         "numerical supplemental-test planner timed out without a usable plan"
                     ) from exc
                 check_review_service(result)
-                raise
+                raise InvalidReview(str(exc)) from exc
             else:
                 record["validated"] = True
                 if result.timed_out:
@@ -248,7 +253,8 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
 
     context = hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest()
     stage = f"numerical-advice:{digest}:{campaign.agent_cli}:{campaign.production_review_timeout}:{context}"
-    return retry_infrastructure(campaign.workspace, stage, review_once, cancel=cancel)
+    return retry_infrastructure(campaign.workspace, stage,
+        lambda: retry_invalid_review(campaign.workspace, stage, review_once, cancel=cancel), cancel=cancel)
 
 
 def _probe_status(batch, plan, suite, shapes):
@@ -305,7 +311,8 @@ def _run_probes(campaign, workspace, suite, shapes_path, digest, directory, *, c
             # Model construction may JIT-compile before the first input receipt.
             # Use the ordinary Evaluate budget, not the legacy harness's 20s
             # default. This is part of the recorded request/dedup identity.
-            "candidate_timeout_s": CANDIDATE_TIMEOUT,
+            "candidate_timeout_s": getattr(getattr(campaign, "module_options", None),
+                                           "candidate_timeout_seconds", CANDIDATE_TIMEOUT),
             "max_rel_l2": _fp4_correctness_max_rel_l2(workspace) or MAX_REL_L2,
         })
 
@@ -477,29 +484,7 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
                 durable_write_json(plan_path, review, indent=2)
         if _digest(validation_files) != validation_digest:
             raise ValueError("candidate or contract changed during supplemental validation")
-    except NumericalPlanningTimeout as exc:
-        try:
-            # Only the controller's just-verified sealed evidence permits a skip;
-            # Agent-writable legacy evaluation logs are never a trust source.
-            standard_passed = standard_correctness_passed
-            measured_failure = record.get("known_candidate_failure", False) or any(
-                evaluation.get("status") == "needs_repair"
-                or any(probe.get("status") == "needs_repair"
-                       for probe in evaluation.get("probes", []))
-                for evaluation in record.get("evaluations", [])
-            )
-            unchanged = _digest(validation_files) == validation_digest
-            record.update(
-                status=("skipped_planner_timeout" if standard_passed and unchanged and not measured_failure
-                        else "needs_validation"),
-                diagnosis=str(exc), standard_correctness_passed=bool(standard_passed),
-            )
-        except (OSError, ValueError, TypeError, KeyError) as evidence_error:
-            record.update(
-                status="needs_validation",
-                diagnosis=f"{exc}; timeout skip evidence unavailable: {evidence_error}",
-            )
-    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError, ValidationBlocked) as exc:
         record.update(status="needs_validation", diagnosis=str(exc))
 
     cancel.check()
@@ -525,7 +510,7 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
     # Probe errors already passed through the Gateway or the redaction above.
     # Other planner exceptions remain in the private numerical_result.json.
     rendered = json.dumps(public, ensure_ascii=False, allow_nan=False)
-    if status in {"passed", "advisory", "skipped_planner_timeout"}:
+    if status in {"passed", "advisory"}:
         feedback = ""
     elif status == "needs_repair":
         if flow == "framework_baseline":

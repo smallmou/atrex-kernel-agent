@@ -49,6 +49,11 @@ its supported in-process loader in `kernel.py`, not a separate executable `kerne
 CUDA bindings/NVRTC on SOL workers, where `load_inline` is blocked. Keep any supplied
 `solution.json` consistent with the implementation.
 
+The selected executor's source policy also applies to loader and launch code. Use its
+supported CUDA bindings; a production dependency review does not override remote source
+validation. If a loader import such as `ctypes` or `os` is rejected, replace that loader
+with supported in-process bindings instead of resubmitting the same source or hiding the import.
+
 After the implementation edit, run this smoke command:
 
 ```bash

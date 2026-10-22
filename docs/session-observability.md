@@ -79,15 +79,15 @@ Functional output waits for both pipe readers to reach EOF. A configured timeout
 
 | Responsibility | Implementation |
 | --- | --- |
-| Process execution, timeout/interruption, finalization hook | [`run_bounded()`](../orchestrator/agent_runtime/process.py) |
-| Capture setup, pipe readers, monitor, finalization, stdout-bound observation | [`session_capture.py`](../orchestrator/session_capture.py) |
-| Current-session and descendant transcript discovery | [`session_native.py`](../orchestrator/session_native.py) |
-| Incremental native reads, invocation-local limits, separate resume-history scan | [`session_tail.py`](../orchestrator/session_tail.py) |
-| De-duplicated conversation projection | [`session_transcript.py`](../orchestrator/session_transcript.py) |
-| Provider counters, reconciliation, partial/unavailable usage | [`session_usage.py`](../orchestrator/session_usage.py) |
-| Stream normalization and Capture/Ledger selection | [`adapter.py`](../orchestrator/agent_runtime/adapter.py), [`codex_ledger.py`](../orchestrator/agent_runtime/codex_ledger.py) |
-| Conservative merge of overlapping usage evidence | [`merge_token_usage_evidence()`](../orchestrator/agent_runtime/model.py) |
-| Observation consumers and Codex exception fallback | [`agent_runtime/runtime.py`](../orchestrator/agent_runtime/runtime.py), [`long_horizon/main_adapter.py`](../long_horizon/main_adapter.py), [`long_horizon/session.py`](../long_horizon/session.py) |
+| Process execution, timeout/interruption, finalization hook | [`run_bounded()`](../src/aka/light/agent/runtime/process.py) |
+| Capture setup, pipe readers, monitor, finalization, stdout-bound observation | [`session_capture.py`](../src/aka/light/agent/session_capture.py) |
+| Current-session and descendant transcript discovery | [`session_native.py`](../src/aka/light/agent/session_native.py) |
+| Incremental native reads, invocation-local limits, separate resume-history scan | [`session_tail.py`](../src/aka/light/agent/session_tail.py) |
+| De-duplicated conversation projection | [`session_transcript.py`](../src/aka/light/agent/session_transcript.py) |
+| Provider counters, reconciliation, partial/unavailable usage | [`session_usage.py`](../src/aka/light/agent/session_usage.py) |
+| Stream normalization and Capture/Ledger selection | [`adapter.py`](../src/aka/light/agent/runtime/adapter.py), [`codex_ledger.py`](../src/aka/light/agent/runtime/codex_ledger.py) |
+| Conservative merge of overlapping usage evidence | [`merge_token_usage_evidence()`](../src/aka/light/agent/runtime/model.py) |
+| Observation consumers and Codex exception fallback | [`agent_runtime/runtime.py`](../src/aka/light/agent/runtime/runtime.py), [`workflow/context.py`](../src/aka/light/workflow/context.py), [`workflow/session.py`](../src/aka/light/workflow/session.py) |
 
 ## Where records live
 
@@ -181,10 +181,55 @@ Each capture directory is created with mode `0700`. Only the current session and
 
 ## Verification
 
+### Model-service recovery in Light
+
+Shared Pi and Claude adapters expose `classify_model_service_failure` separately
+from usage normalization and process exit status. Pi's terminal assistant
+`message_end` with `stopReason=error` can identify throttling even when the CLI
+exits zero. Claude classification uses root API-error messages. Ordinary output,
+tool errors, subagent messages and numeric usage counters do not establish a
+provider failure. Explicit quota-exhaustion codes pause immediately; a generic
+429 mentioning quota is treated as potentially transient.
+
+Light Long Horizon preserves the current Episode and draft during recovery.
+There are at most **six additional provider calls per Episode**, with a
+**30-minute wall-clock window per interruption**. Backoff starts at 30 seconds,
+doubles to a 300-second cap and adds jitter. An exposed `Retry-After` is a lower
+bound; a delay beyond the recovery window pauses instead of retrying early.
+Claude resumes its session; Pi opens a fresh session in the same Agent workspace.
+A valid terminal handoff takes precedence over a provider error.
+
+The Campaign's `.atrex_long_horizon/active_episode.json` stores `model_service`:
+retry count, first failure time, next retry time, session reference, active time
+used, failure classification and pause reason. Reservations are saved before
+provider invocation. Restarting retains the budget, and an interrupted reserved
+attempt cannot be replayed for free. Even after execution recovers, the
+per-Episode retry count is retained. Backoff does not consume active execution
+time; real model tokens remain charged through the existing usage receipts.
+
+While waiting, the phase is `waiting_model_service`. Exhaustion, explicit quota
+failure, or exhausted token/active-time budget during recovery produces
+`paused_model_service` and raises `ModelServicePaused`, preserving the Episode
+without writing an outcome or advancing its version. Normal process startup
+refuses a paused checkpoint before Campaign preparation. This is not a successful
+completion. External launchers must report the pause instead of clearing recovery
+state or launching a new workspace. Automatic restart never resets these limits;
+an operator must resolve availability and explicitly authorize any budget reset.
+This policy applies to Long Horizon coding sessions; it does not add automatic
+retries to standalone Legacy calls or independent review sessions.
+
+Run the provider-recovery regressions without model or GPU credentials:
+
+```bash
+PYTHONPATH=src python3 tools/test_model_service_recovery.py
+```
+
+### Capture checks
+
 The CLI import/argument smoke check requires no GPU or model credentials:
 
 ```bash
-python3 orchestrator/optimize.py --help
+aka optimize --help
 ```
 
 Regression tests are maintained outside this repository. Local validation uses recorded-format fixtures and real Python subprocesses instead of paid Agent CLIs. It covers native children, duplicate/cumulative counters, resume deltas, phase ordering, scoped shared-home discovery, capture limits, complete functional stdout/stderr, pipe draining after write/parser failures, ledger-failure diagnostics and resume qualification, normal exit, timeout, Long Horizon invocation archives, and the kill switch (including destination precedence, stale-observation clearing, environment propagation, and stream/ledger fallback). Boundary regressions also cover a larger ledger versus incomplete Capture, partial-fallback cursor invalidation, output arriving more than five seconds after the root exits, timeout/interruption after leader exit, and oversized native lines spanning multiple polls. The CLI smoke check alone does not verify these behaviors.

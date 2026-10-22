@@ -9,7 +9,7 @@ from aka.light.evaluation.provider import result_from_response
 from aka.light.experiment.store import EvidenceUnavailable
 from aka.light.workspace.files import read_input, publish
 from aka.light.workspace.episode import PUBLIC_FILES
-from aka.light.execution.retry import InfrastructureUnavailable
+from aka.light.execution.retry import InfrastructureUnavailable, ValidationBlocked
 from aka.light.runtime.errors import GatewayExecutionUnavailable, RequestDispatchTimeout
 
 from aka.light.workspace.git import git_blob, warn_kernel_mismatch
@@ -121,7 +121,7 @@ zero-submission guarantee. ABBA does not replace the standard full Evaluate requ
             scored.gateway_record_id = result["gateway_record_id"]
             scored.reused = response.get("reused") is True
             return scored
-        except InfrastructureUnavailable:
+        except (InfrastructureUnavailable, ValidationBlocked):
             raise
         except (GatewayExecutionUnavailable, RequestDispatchTimeout) as error:
             raise InfrastructureUnavailable(str(error)) from error

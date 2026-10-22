@@ -210,6 +210,8 @@ class RuntimeConfig:
     request_timeout: float | None = None
     queue_timeout: float = 60
     measurement_repetitions: int = 1
+    candidate_timeout_seconds: int = 120
+    performance_timeout_seconds: int = 120
     wiki_enabled: bool = False
     wiki_options: WikiConfig = field(default_factory=WikiConfig)
 
@@ -407,6 +409,8 @@ class SupervisorRuntime:
         self.plugins = PluginRegistry(enabled=config.wiki_enabled)
         self.workspace_provider = workspace_provider
         self.environment = {k: v for k, v in os.environ.items() if k not in {OWNER_ENV, URL_ENV, TOKEN_ENV}}
+        self.environment["ATREX_SANDBOX_CANDIDATE_TIMEOUT_S"] = str(self.config.candidate_timeout_seconds)
+        self.environment["ATREX_SANDBOX_PERF_TIMEOUT_S"] = str(self.config.performance_timeout_seconds)
         self.gateway_queue_wait_grace = configured_queue_wait_grace(self.environment)
         repetitions = str(config.measurement_repetitions)
         if repetitions not in {"1", "3"}:

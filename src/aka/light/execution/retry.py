@@ -27,6 +27,22 @@ class InfrastructureUnavailable(RuntimeError):
     pass
 
 
+class EvidenceIncomplete(InfrastructureUnavailable):
+    """Terminal evidence cannot establish either a pass or a candidate failure."""
+
+
+class JobsPending(InfrastructureUnavailable):
+    """Known queued/running jobs are polled, not charged as failed recovery."""
+
+
+class ValidationBlocked(RuntimeError):
+    """A durable validation budget is exhausted; operator action is required."""
+
+
+class InvalidReview(ValueError):
+    """The reviewer did not produce a schema-valid result."""
+
+
 class ReviewerExecutionTimeout(RuntimeError):
     """A completed review session explicitly exceeded its execution deadline."""
 
@@ -55,7 +71,7 @@ def _load_retry_state(path: Path, stage: str, category: str) -> dict:
             if type(count) is not int or count < 0 or (count_key == "timeout_count" and count > 2):
                 raise ValueError(f"invalid {count_key}")
             if category == "infrastructure":
-                if record.get("status") not in ("waiting_for_infrastructure", "recovered", "step_failed"):
+                if record.get("status") not in ("waiting_for_infrastructure", "recovered", "step_failed", "blocked"):
                     raise ValueError("invalid infrastructure status")
                 if record["status"] == "waiting_for_infrastructure" and "next_retry_at" not in record:
                     raise ValueError("missing infrastructure retry deadline")
@@ -112,6 +128,8 @@ def retry_infrastructure(workspace: Path, stage: str, operation, *, cancel=None)
     key = hashlib.sha256(stage.encode()).hexdigest()[:24]
     path = _state_path(workspace, "infrastructure", key)
     record = _load_retry_state(path, stage, "infrastructure")
+    if record.get("status") == "blocked":
+        raise ValidationBlocked(record["reason"])
     if record.get("status") == "waiting_for_infrastructure":
         # Shorten older waits to the current policy without restarting the
         # countdown or resetting the durable retry count on every resume.
@@ -138,7 +156,16 @@ def retry_infrastructure(workspace: Path, stage: str, operation, *, cancel=None)
                 "retry_count": record.get("retry_count", 0) + 1,
                 "last_failure_at": now, "next_retry_at": now + POLL_SECONDS,
                 "poll_seconds": POLL_SECONDS, "reason": reason,
+                "first_failure_at": now if isinstance(exc, JobsPending) else record.get("first_failure_at", now),
+                "incomplete_count": record.get("incomplete_count", 0) + int(isinstance(exc, EvidenceIncomplete)),
             }
+            if record["incomplete_count"] >= 3 or (
+                not isinstance(exc, JobsPending) and now - record["first_failure_at"] >= 1800
+            ):
+                record.update(status="blocked", finished_at=now,
+                              reason="Validation recovery exhausted; " + reason)
+                durable_write_json(path, record, indent=2, ensure_ascii=False)
+                raise ValidationBlocked(record["reason"]) from exc
             durable_write_json(path, record, indent=2, ensure_ascii=False)
             print(f"[infrastructure] {stage}: {reason}; retry in {POLL_SECONDS} seconds; "
                   f"candidate and episode preserved; state={path}", flush=True)
@@ -160,6 +187,58 @@ def retry_infrastructure(workspace: Path, stage: str, operation, *, cancel=None)
                 durable_write_json(path, record, indent=2, ensure_ascii=False)
                 print(f"[infrastructure] {stage}: recovered; continuing validation", flush=True)
             return result
+
+
+def retry_invalid_review(workspace, stage, operation, *, cancel=None):
+    """Three fresh reviewer invocations per evidence, including across restarts."""
+    key = hashlib.sha256(stage.encode()).hexdigest()[:24]
+    path = _state_path(workspace, "invalid_reviews", key)
+    record = _load_retry_state(path, stage, "invalid_reviews")
+    count = record.get("retry_count", 0)
+    if record.get("status") == "complete":
+        return record["result"]
+    while count < 3:
+        if cancel is not None and cancel.is_set():
+            raise CancelledError("review cancelled")
+        count += 1
+        record = {"schema_version": 1, "stage": stage, "retry_count": count, "status": "running"}
+        durable_write_json(path, record)
+        try:
+            result = operation()
+        except InvalidReview as exc:
+            record.update(status="invalid", reason=str(exc))
+            durable_write_json(path, record)
+        except (InfrastructureUnavailable, CancelledError):
+            # Known service interruptions are handled by their own recovery policy.
+            record.update(retry_count=count - 1, status="interrupted")
+            durable_write_json(path, record)
+            raise
+        else:
+            durable_write_json(path, dict(record, status="complete", result=result))
+            return result
+    reason = "Reviewer produced no valid result in three attempts for this evidence"
+    durable_write_json(path, dict(record, status="blocked", reason=reason))
+    raise ValidationBlocked(reason)
+
+
+def baseline_repair_count(workspace, baseline_commit):
+    stage = "framework-baseline:" + baseline_commit
+    path = _state_path(workspace, "baseline_repairs", hashlib.sha256(stage.encode()).hexdigest()[:24])
+    record = _load_retry_state(path, stage, "baseline_repairs")
+    return record.get("retry_count", 0)
+
+
+def reserve_baseline_repair(workspace, baseline_commit):
+    """Reserve one of three coding repairs before invoking the Agent."""
+    stage = "framework-baseline:" + baseline_commit
+    path = _state_path(workspace, "baseline_repairs", hashlib.sha256(stage.encode()).hexdigest()[:24])
+    count = baseline_repair_count(workspace, baseline_commit)
+    if count >= 3:
+        reason = "Framework baseline exhausted three coding repairs; candidate preserved"
+        durable_write_json(path, {"schema_version": 1, "stage": stage, "retry_count": count,
+                                  "status": "blocked", "reason": reason})
+        raise ValidationBlocked(reason)
+    durable_write_json(path, {"schema_version": 1, "stage": stage, "retry_count": count + 1})
 
 
 def retry_review(workspace: Path, stage: str, operation, *, cancel: Event | None = None):

@@ -13,7 +13,8 @@ from aka.contracts.agent import Agent, NativeInvocation
 from aka.light.workflow.models import EpisodeHandoff, InvocationObservation, SessionResult
 from aka.light.workflow.protocol import handoff_diagnosis, read_handoff
 from aka.light.workflow.output_limit import recovery_prompt
-from aka.light.agent.runtime.adapter import ClaudeAdapter
+from aka.light.agent.runtime.adapter import ClaudeAdapter, DEFAULT_BACKEND_REGISTRY
+from .model_service import MAX_RETRIES, ModelServiceRecovery
 
 CompletionCheck = Callable[[EpisodeHandoff], str]
 _CLAUDE_TRANSIENT_API_ERRORS = {"api error: terminated"}
@@ -22,13 +23,7 @@ _CLAUDE_TRANSIENT_API_ERRORS = {"api error: terminated"}
 def _claude_retryable_api_error(message: str) -> bool:
     """Return whether a bounded same-session retry can preserve useful work."""
     normalized = message.strip().casefold()
-    if normalized in _CLAUDE_TRANSIENT_API_ERRORS:
-        return True
-    return (
-        "request rejected (429)" in normalized
-        and "throttling" in normalized
-        and "exceeded your current quota" in normalized
-    )
+    return normalized in _CLAUDE_TRANSIENT_API_ERRORS
 
 
 def _claude_transient_api_error(stdout: str) -> str:
@@ -71,8 +66,16 @@ class LongSessionRunner:
 
     def run(self, *args, episode_timeout_seconds=28800, **kwargs) -> SessionResult:
         from aka.light.agent.execution_clock import episode_budget
-        with episode_budget(episode_timeout_seconds):
-            return self._run(*args, **kwargs)
+        if "model_service_recovery" not in kwargs:
+            kwargs["model_service_recovery"] = ModelServiceRecovery({}, lambda _: None)
+        recovery = kwargs["model_service_recovery"]
+        with episode_budget(episode_timeout_seconds) as budget:
+            budget.used = recovery.state.get("active_seconds", 0.0)
+            try:
+                return self._run(*args, **kwargs)
+            finally:
+                recovery.state["active_seconds"] = budget.used
+                recovery.save(recovery.active)
 
     def _run(
         self,
@@ -88,11 +91,18 @@ class LongSessionRunner:
         record_usage: Callable[[int], None] | None = None,
         output_limit_recovery_retries: int = 2,
         remaining_token_budget: int | None = None,
+        model_service_recovery: ModelServiceRecovery,
     ) -> SessionResult:
         if (type(output_limit_recovery_retries) is not int
                 or not 0 <= output_limit_recovery_retries <= 10):
             raise ValueError("output_limit_recovery_retries must be an integer from 0 to 10")
-        session_id = session_id or str(uuid.uuid4())
+        recovery = model_service_recovery
+        recovery.check_paused()
+        from .protocol_recovery import check_protocol_paused
+        check_protocol_paused(recovery.active)
+        previous_session_id = recovery.state.get("session_id", "") if recovery.pending else ""
+        session_id = session_id or previous_session_id or str(uuid.uuid4())
+        adapter = DEFAULT_BACKEND_REGISTRY.create(self.agent_cli)
         is_codex = self.agent_cli == "codex"
         active_session_id = "" if is_codex else session_id
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +134,8 @@ class LongSessionRunner:
             while True:
                 from aka.light.agent.execution_clock import current_budget
                 if current_budget().remaining <= 0:
+                    if recovery.pending:
+                        recovery.pause("Episode active-time budget exhausted during model-service recovery")
                     timed_out = True
                     exit_status = exit_status or -signal.SIGKILL
                     completion_diagnosis = "Episode active-time budget exhausted; no continuation started"
@@ -133,29 +145,49 @@ class LongSessionRunner:
                     from concurrent.futures import CancelledError
                     raise CancelledError("Search coordinator stopped this Episode")
                 if remaining_token_budget is not None and total_tokens >= remaining_token_budget:
+                    if recovery.pending:
+                        recovery.pause("Episode token budget exhausted during model-service recovery")
                     completion_diagnosis = "Episode token budget exhausted; no continuation started"
                     exit_status = exit_status or 1
                     break
-                if next_prompt is not None:
+                if recovery.pending:
+                    recovery.before_retry(cancel)
+                    turn_prompt = (
+                        "Continue this same Episode after a model-service interruption. "
+                        "Inspect the preserved draft and existing Runtime evaluation receipts; "
+                        "continue unfinished work without repeating completed evaluations. "
+                        "Submit tools/sandbox.py --kind episode-report when ready. "
+                        "Do not hand-write a handoff.\n\n" + prompt
+                    )
+                    resume = bool(native.supports_resume and active_session_id)
+                    if not resume:
+                        native.close()
+                        active_session_id = str(uuid.uuid4())
+                        native = self.agent.open_session(
+                            self.agent_cli, workspace, session_id=active_session_id,
+                            environment=telemetry_environment,
+                        )
+                    purpose = "model_service_recovery"
+                    print(f"[long-horizon] model-service retry {recovery.state['retry_count']}/{MAX_RETRIES}; "
+                          "preserving Episode draft", flush=True)
+                elif next_prompt is not None:
                     turn_prompt = next_prompt
                     resume = False
                 else:
-                    if resume_count >= max(0, handoff_resumes):
+                    used = recovery.active.get("protocol_repair_count", 0)
+                    if used >= min(2, max(0, handoff_resumes)):
                         break
-                    if not native.supports_resume:
-                        completion_diagnosis = (
-                            completion_diagnosis
-                            or f"{self.agent_cli} ended without a valid terminal handoff"
-                        )
-                        break
-                    if not active_session_id:
-                        completion_diagnosis = (
-                            completion_diagnosis
-                            or f"{self.agent_cli} ended without exposing a resumable session id"
-                        )
-                        break
+                    recovery.active["protocol_repair_count"] = used + 1
+                    recovery.save(recovery.active)
                     resume_count += 1
-                    resume = True
+                    resume = bool(native.supports_resume and active_session_id)
+                    if not resume:
+                        native.close()
+                        active_session_id = str(uuid.uuid4())
+                        native = self.agent.open_session(
+                            self.agent_cli, workspace, session_id=active_session_id,
+                            environment=telemetry_environment,
+                        )
                     purpose = "handoff_resume"
                     diagnosis = completion_diagnosis or handoff_diagnosis(handoff_path)
                     turn_prompt = (
@@ -186,10 +218,13 @@ class LongSessionRunner:
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
                 active_session_id = turn.session_id or active_session_id
+                service_failure = adapter.classify_model_service_failure(stdout, active_session_id)
                 failure_kind, provider_error_code = (
                     ClaudeAdapter().classify_terminal_failure(stdout, active_session_id)
                     if self.agent_cli == "claude" else (None, None)
                 )
+                if service_failure is not None:
+                    failure_kind, provider_error_code = service_failure.kind, service_failure.code
                 if failure_kind:
                     exit_status = exit_status or 1
                 total_tokens += self.usage_policy(turn)
@@ -208,6 +243,7 @@ class LongSessionRunner:
                 )
                 if record_usage is not None:
                     record_usage(total_tokens)
+                recovery.checkpoint(session_id=active_session_id, active_seconds=current_budget().used)
                 # Even an interrupted candidate has consumed real model tokens.
                 # Account first, then stop without consuming an episode outcome.
                 raise_if_environment_blocked()
@@ -221,9 +257,16 @@ class LongSessionRunner:
                         # when the CLI lingered until its turn timeout afterward.
                         exit_status = 0
                         timed_out = False
+                        recovery.observed_non_service_result()
                         break
                 else:
                     completion_diagnosis = handoff_diagnosis(handoff_path)
+                if service_failure is not None:
+                    recovery.failed(service_failure)
+                    print(f"[long-horizon] {service_failure.kind}; Episode preserved; "
+                          f"retry at {recovery.state['next_retry_at']:.0f}", flush=True)
+                    continue
+                recovery.observed_non_service_result()
                 if timed_out:
                     if current_budget().remaining <= 0:
                         completion_diagnosis = "Episode active-time budget exhausted; no continuation started"

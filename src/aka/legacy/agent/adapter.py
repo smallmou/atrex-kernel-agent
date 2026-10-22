@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .markers import phase_marker_receipts
+from .model_service import ModelServiceFailure, classify_service_error
 from .model import (
     AgentRuntimeCapabilities,
     NormalizedAgentEvent,
@@ -178,6 +179,11 @@ class AgentBackendAdapter(ABC):
     @abstractmethod
     def auth_hint(self) -> str: ...
 
+    def classify_model_service_failure(
+        self, stdout: str, session_id: str = ""
+    ) -> ModelServiceFailure | None:
+        return None
+
 
 def _phase_marker_receipts(event: Mapping[str, object]):
     event_type = event.get("type")
@@ -310,6 +316,30 @@ class ClaudeAdapter(ClaudeLikeAdapter):
     id = "claude"
     settings_variable = "ATREX_CLAUDE_SESSION_SETTINGS"
 
+    def classify_model_service_failure(self, stdout, session_id=""):
+        failure = None
+        for event in _json_events(stdout):
+            if event.get("parent_tool_use_id") is not None:
+                continue
+            if session_id and event.get("session_id") not in (None, session_id):
+                continue
+            if event.get("type") == "assistant":
+                failure = None
+                if (event.get("isApiErrorMessage") is True
+                        or event.get("is_api_error_message") is True):
+                    error = dict(event)
+                    message = event.get("message")
+                    content = message.get("content") if isinstance(message, Mapping) else None
+                    if isinstance(content, list):
+                        error["errorMessage"] = "\n".join(
+                            block["text"] for block in content if isinstance(block, Mapping)
+                            and block.get("type") == "text" and isinstance(block.get("text"), str)
+                        )
+                    failure = classify_service_error(error)
+            elif event.get("type") == "result" and event.get("is_error") is False:
+                failure = None
+        return failure
+
     def __init__(self, runtime_assets_dir: Path | None = None) -> None:
         del runtime_assets_dir
 
@@ -403,6 +433,21 @@ class QoderAdapter(ClaudeLikeAdapter):
 class PiAdapter(AgentBackendAdapter):
     id = "pi"
     settings_variable = "ATREX_PI_SESSION_SETTINGS"
+
+    def classify_model_service_failure(self, stdout, session_id=""):
+        failure = None
+        for event in _json_events(stdout):
+            if event.get("type") != "message_end":
+                continue
+            message = event.get("message")
+            if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                continue
+            failure = None
+            if message.get("stopReason") == "error":
+                # Exclude assistant content: quoted errors are not provider failures.
+                failure = classify_service_error({key: value for key, value in message.items()
+                                                  if key != "content"})
+        return failure
     capabilities = AgentRuntimeCapabilities(
         terminal_usage=True,
         usage_delta=True,

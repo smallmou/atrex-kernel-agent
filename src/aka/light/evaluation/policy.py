@@ -26,12 +26,19 @@ def validate_abba_repeats(repeats: int) -> None:
         raise ValueError("--comparison-repeats must be even, in 2..16 (measurements per side)")
 
 
-def runner_overrides() -> dict:
-    return {"warmup_iters": WARMUP_ITERS, "candidate_timeout_s": CANDIDATE_TIMEOUT,
-            "perf_timeout_s": PERFORMANCE_TIMEOUT}
+def runner_overrides(environment=None) -> dict:
+    import os
+    environment = os.environ if environment is None else environment
+    values = {"warmup_iters": WARMUP_ITERS}
+    for field, default in (("candidate_timeout_s", CANDIDATE_TIMEOUT), ("perf_timeout_s", PERFORMANCE_TIMEOUT)):
+        value = int(environment.get("ATREX_SANDBOX_" + field.upper(), default))
+        if not 1 <= value <= 86400:
+            raise ValueError(f"{field} must be between 1 and 86400 seconds")
+        values[field] = value
+    return values
 
 
-def measurement_defaults() -> dict:
+def measurement_defaults(environment=None) -> dict:
     return {"contract": MEASUREMENT_CONTRACT, "bench_iters": BENCH_ITERS,
             "correctness_cases": CORRECTNESS_CASES, "lock_clocks": True,
-            "runner_overrides": runner_overrides()}
+            "runner_overrides": runner_overrides(environment)}

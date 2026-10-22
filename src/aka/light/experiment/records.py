@@ -26,6 +26,29 @@ from aka.light.experiment.identifiers import GATEWAY_RECORD_ID_RE, KERNEL_RECORD
 QUERY_KINDS = {"record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"}
 
 
+def acceptance_disposition(states, response):
+    """Separate evidence completeness from cache policy using private job receipts."""
+    from aka.light.execution.gateway_jobs import candidate_failure, retry_kind
+    from aka.light.evaluation.evaluation_failures import embedded_device_failure
+    if not states:
+        return "incomplete"
+    if any(state.get("phase") != "terminal" for state in states):
+        return "pending"
+    jobs = [job_from_process(subprocess.CompletedProcess(
+        [], state["process"]["returncode"], state["process"]["stdout"], state["process"]["stderr"]))
+        for state in states]
+    if any(retry_kind(job) == "infra" or isinstance(job, dict) and embedded_device_failure(job)
+           for job in jobs):
+        return "infra"
+    if any(candidate_failure(job, state.get("identity", {})) for job, state in zip(jobs, states)):
+        return "candidate_failure"
+    if not response.get("truncated") and all(
+        cacheable_job(job, state.get("identity")) for job, state in zip(jobs, states)
+    ):
+        return "complete"
+    return "incomplete"
+
+
 def _read_record(reader, identifier, *, field, pattern):
     if not isinstance(identifier, str) or pattern.fullmatch(identifier) is None:
         raise field_error(field, f"{field} must be a complete ID returned by this Campaign")
@@ -244,11 +267,15 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                     cacheable = cacheable and sample is not None and isinstance(sample.get("correct"), bool)
                 if sample is not None:
                     samples.append(sample)
-                if process.returncode != 0 or sample is None or not cacheable:
+                negative = sample is not None and (
+                    sample.get("all_pass") is False or sample.get("correct") is False)
+                if process.returncode != 0 or sample is None or not cacheable or negative:
                     break
             response = responses[-1]
             aggregated_result = None
-            if repetitions > 1 and len(samples) == repetitions and all(row.get("exit_code") == 0 for row in responses):
+            if (repetitions > 1 and len(samples) == repetitions
+                    and all(row.get("exit_code") == 0 for row in responses)
+                    and all(row.get("all_pass", row.get("correct")) is True for row in samples)):
                 aggregated_result = evaluation.aggregate(samples, plan)
             # IDs are attached to the same public payload stored and re-read.
             prefix = PREFIXES.get(operation)
@@ -283,18 +310,14 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                 for state in states
             )
             if reuse_completed and not cacheable and not source_rejected:
-                from aka.light.execution.gateway_jobs import retry_kind
-                from aka.light.execution.retry import InfrastructureUnavailable
-
-                if states and all(state.get("phase") == "terminal" for state in states) and any(
-                    retry_kind(job_from_process(subprocess.CompletedProcess(
-                        [], state["process"]["returncode"], state["process"]["stdout"], state["process"]["stderr"]))) == "infra"
-                    for state in states
-                ):
+                from aka.light.execution.retry import InfrastructureUnavailable, EvidenceIncomplete, JobsPending
+                disposition = acceptance_disposition(states, response)
+                if disposition == "infra":
                     raise InfrastructureUnavailable("Recorded GPU validation infrastructure failure")
-                raise InfrastructureUnavailable(
-                    "Acceptance measurement is incomplete or uncertain; inspect its private Gateway Record"
-                )
+                if disposition == "pending":
+                    raise JobsPending("GPU jobs are still pending; recover their recorded IDs")
+                if disposition == "incomplete":
+                    raise EvidenceIncomplete("Terminal GPU evidence is incomplete; inspect its private Gateway Record")
             if operation == "evaluate" and repetitions > 1 and samples:
                 from aka.light.evaluation.gateway import EPISODE_EVALUATIONS_PATH
                 # The old report compiler must see the same aggregate as the

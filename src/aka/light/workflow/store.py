@@ -116,6 +116,11 @@ class CampaignStore:
         return value if isinstance(value, dict) else None
 
     def save_active(self, value: dict[str, Any]) -> None:
+        import time
+        previous = self.load_active() or {}
+        progress = ("episode", "phase", "candidate_commit", "promotion_commit")
+        if any(previous.get(key) != value.get(key) for key in progress):
+            value["last_progress_at"] = time.time()
         atomic_write_json(self.active_path, value)
 
     def clear_active(self) -> None:

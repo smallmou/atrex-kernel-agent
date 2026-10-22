@@ -4910,7 +4910,7 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     options["kind"] = kind
     options["command"] = normalized
     if operation in {"evaluate", "same_allocation_abba"}:
-        options["measurement_defaults"] = measurement_defaults()
+        options["measurement_defaults"] = measurement_defaults(environment)
     if operation == "same_allocation_abba":
         options["transport"] = "agate_native_eval_abba"
     if operation == "evaluate" and for_command:

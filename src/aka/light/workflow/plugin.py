@@ -14,6 +14,9 @@ Config = {"type": "object", "properties": {
     "generate_memory": {"type": "boolean"},
     "output_limit_recovery_retries": {"type": "integer", "minimum": 0, "maximum": 10},
     "episode_timeout_seconds": {"type": "number", "minimum": 0},
+    "candidate_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "performance_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "episode_limit": {"type": "integer", "minimum": 0},
     "source_tree": {"type": "object", "properties": {
         "manifest": {"type": "string", "minLength": 1},
         "repository": {"type": "string", "minLength": 1},
